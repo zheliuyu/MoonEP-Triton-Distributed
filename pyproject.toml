@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moonep-td"
+version = "0.1.0"
+description = "MoonEP reimplemented on Triton-distributed"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # cu124 wheel index tops out at torch 2.6.x (see README verified env)
+    "torch>=2.6,<2.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["moonep_td*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]

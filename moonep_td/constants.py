@@ -1,0 +1,9 @@
+# Bit widths for packed int32 dedup encodings (must match MoonEP).
+RANK_BITS = 7
+KIDX_BITS = 7
+DEDUP_BUILDER_WARPS = 4
+
+GRID_SYNC_TAG = 0x80000000
+WARP_SYNC_TAG = 0x80000000
+BARRIER_SLOTS = 3
+BLOCK_SIZE_P2 = 2048
