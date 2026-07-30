@@ -109,11 +109,6 @@ CASES = [
         "owner_offset": 1,
         "experts": lambda E: [3, E - 1, 3, 0, E // 2, E - 1, 7, 1],
     },
-    # Production-like expert shape where expert_id * H * Hp crosses 2^31
-    # elements (expert ids >= 98 at 7168x3072). Catches 32-bit offset
-    # arithmetic anywhere in the TMA descriptor / addressing chain.
-    # spotcheck: only materialize/verify the experts in the plan (full E×H×Hp
-    # fill + equality takes many minutes and peaks another 4.5 GiB).
     {
         "name": "i64_offset_7168x3072",
         "E": 104,
@@ -123,7 +118,6 @@ CASES = [
         "num_sms": 32,
         "owner_offset": 1,
         "experts": lambda E: [E - 1, 98, -1],
-        "spotcheck": True,
     },
     # Random plans (holes, duplicates, uneven coverage) at B=16.
     {
@@ -181,37 +175,24 @@ def dist_env():
     yield rank, R
 
     dist.barrier(device_ids=[rank])
-    if owns_process_group:
-        dist.destroy_process_group()
 
 
-def _fill_owner_experts(dst, E, H, Hp, seed, device, fill_experts=None):
-    """Fill owner expert rows without a single E×H×Hp temporary.
-
-    ``fill_experts`` restricts which rows get randn (rest stay zero). That
-    keeps the i64 production-shape case from allocating an extra ~4.5 GiB
-    peak and from spending minutes materializing unused experts.
-    """
+def _fill_owner_experts(dst, E, H, Hp, seed, device):
+    """Fill owner expert rows without a single E×H×Hp temporary."""
     gen = torch.Generator(device=device).manual_seed(seed)
     dst.zero_()
-    if fill_experts is None:
-        elems_per_expert = H * Hp
-        chunk = max(1, min(E, (256 * 1024 * 1024) // max(1, elems_per_expert * 2)))
-        for e0 in range(0, E, chunk):
-            e1 = min(E, e0 + chunk)
-            dst[e0:e1].copy_(
-                torch.randn(
-                    e1 - e0, H, Hp, dtype=torch.bfloat16, device=device, generator=gen
-                )
+    elems_per_expert = H * Hp
+    chunk = max(1, min(E, (256 * 1024 * 1024) // max(1, elems_per_expert * 2)))
+    for e0 in range(0, E, chunk):
+        e1 = min(E, e0 + chunk)
+        dst[e0:e1].copy_(
+            torch.randn(
+                e1 - e0, H, Hp, dtype=torch.bfloat16, device=device, generator=gen
             )
-        return
-    for e in sorted({int(e) for e in fill_experts if 0 <= int(e) < E}):
-        dst[e].copy_(
-            torch.randn(H, Hp, dtype=torch.bfloat16, device=device, generator=gen)
         )
 
 
-def make_single_owner_experts(rank, R, E, H, Hp, fill_experts=None):
+def make_single_owner_experts(rank, R, E, H, Hp):
     """One symmetric [R, E_pad, H, Hp] tensor; row ``owner`` is filled on that rank."""
     padded_E = pad_dim0_for_alignment([E, H, Hp], torch.bfloat16)
     full = create_nvl_dist_tensor([R, padded_E, H, Hp], torch.bfloat16, rank, R)
@@ -220,7 +201,7 @@ def make_single_owner_experts(rank, R, E, H, Hp, fill_experts=None):
         if rank == owner:
             seed = 2026 + owner + E * 13 + H * 17 + Hp * 19
             _fill_owner_experts(
-                full[owner, :E], E, H, Hp, seed, f"cuda:{rank}", fill_experts=fill_experts
+                full[owner, :E], E, H, Hp, seed, f"cuda:{rank}"
             )
             if padded_E > E:
                 full[owner, E:].zero_()
@@ -248,15 +229,6 @@ def _release_prefetch_nvl_tensors():
         release_nvl_dist_tensor(_PREFETCH_NVL_TENSORS.pop())
 
 
-def _buffers_match(actual, expected, *, spotcheck: bool):
-    """Full equality for small cases; corner/mid rows for huge i64 shapes."""
-    if not spotcheck:
-        return torch.equal(actual, expected)
-    H = actual.shape[0]
-    rows = sorted({0, H // 2, max(0, H - 1)})
-    return all(torch.equal(actual[r], expected[r]) for r in rows)
-
-
 def run_case(rank, R, case):
     E = case["E"]
     H = case["H"]
@@ -264,23 +236,19 @@ def run_case(rank, R, case):
     B = case["B"]
     num_sms = case["num_sms"]
     dev = f"cuda:{rank}"
-    spotcheck = bool(case.get("spotcheck", False))
 
     assert H % 128 == 0 and Hp % 128 == 0, \
         f"{case['name']}: H/Hp must be multiples of 128"
 
     try:
-        expert_ids = case["experts"](E)
-        assert len(expert_ids) == B
-        fill_experts = [e for e in expert_ids if e >= 0] if spotcheck else None
-        all_remote = make_single_owner_experts(
-            rank, R, E, H, Hp, fill_experts=fill_experts
-        )
+        all_remote = make_single_owner_experts(rank, R, E, H, Hp)
         remote_owner = remote_owner_for(rank, R, case["owner_offset"])
         remote_expert = all_remote[remote_owner]
         assert remote_owner != rank, f"{case['name']}: remote owner must not be local"
         assert remote_expert.is_contiguous(), "leading-dim slice should stay contiguous"
 
+        expert_ids = case["experts"](E)
+        assert len(expert_ids) == B
         experts_to_copy = torch.tensor(expert_ids, dtype=torch.int32, device=dev)
         sentinel = -123.0
         prefetch_buffers = torch.full(
@@ -303,9 +271,7 @@ def run_case(rank, R, case):
                         f"buffer={b} was modified"
                     )
                 continue
-            if not _buffers_match(
-                prefetch_buffers[b], remote_expert[e], spotcheck=spotcheck
-            ):
+            if not torch.equal(prefetch_buffers[b], remote_expert[e]):
                 ok = False
                 diff = (prefetch_buffers[b].float() - remote_expert[e].float()).abs().max().item()
                 print(

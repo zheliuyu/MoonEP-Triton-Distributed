@@ -189,120 +189,23 @@ def _assert_all_ranks(ok, rank, label):
     assert int(ok_tensor.item()) == 1, label
 
 
-def _affine_grad_row(expert: int, row: int, Hp: int, device) -> torch.Tensor:
-    col = torch.arange(Hp, dtype=torch.float32, device=device)
-    return expert * 17.0 + row * 0.125 + col * 0.0078125
-
-
-def _affine_grad_expert(expert: int, H: int, Hp: int, device) -> torch.Tensor:
-    out = torch.empty((H, Hp), dtype=torch.float32, device=device)
-    row = torch.arange(H, dtype=torch.float32, device=device).mul_(0.125)
-    col = torch.arange(Hp, dtype=torch.float32, device=device).mul_(0.0078125)
-    out.copy_(row.view(H, 1))
-    out.add_(col.view(1, Hp))
-    out.add_(expert * 17.0)
-    return out
-
-
-def _expected_for_rank(rank, R, E, B, plan_cpu, grads_fn, slot_fn, *, heavy: bool = False):
-    epn = E // R
-    local_start = rank * epn
-    local_end = local_start + epn
-    if heavy:
-        # Build only the local epn experts (affine) to avoid a second 10.5 GiB tensor.
-        device = f"cuda:{rank}"
-        probe = slot_fn(0)
-        H = int(probe.shape[1])
-        Hp = int(probe.shape[2])
-        del probe
-        expected_local = torch.stack(
-            [_affine_grad_expert(expert, H, Hp, device) for expert in range(local_start, local_end)]
-        )
-        for src in range(R):
-            if not bool((plan_cpu[src] >= 0).any()):
-                continue
-            slot_vals = slot_fn(src)
-            for b in range(B):
-                expert = int(plan_cpu[src, b])
-                if local_start <= expert < local_end:
-                    expected_local[expert - local_start].add_(slot_vals[b])
-        return expected_local
-
-    expected = grads_fn()
-    for src in range(R):
-        if not bool((plan_cpu[src] >= 0).any()):
-            continue
-        slot_vals = slot_fn(src)
-        for b in range(B):
-            expert = int(plan_cpu[src, b])
-            if expert >= 0:
-                expected[expert].add_(slot_vals[b])
-    local = expected[local_start:local_end].contiguous()
-    del expected
-    return local
-
-
-def _assert_all_ranks(ok, rank, label):
-    ok_tensor = torch.tensor([int(ok)], dtype=torch.int32, device=f"cuda:{rank}")
-    dist.all_reduce(ok_tensor, op=dist.ReduceOp.MIN)
-    assert int(ok_tensor.item()) == 1, label
-
-
-def _nonlocal_pristine_ok(rank, R, E, H, Hp, remote_expert_grads, grads_fn, *, heavy: bool):
-    """Confirm this rank did not write other ranks' expert rows."""
-    epn = E // R
-    local_start = rank * epn
-    local_end = local_start + epn
-    if not heavy:
-        pristine = grads_fn()
-        ok = torch.equal(
-            remote_expert_grads[:local_start], pristine[:local_start]
-        ) and torch.equal(remote_expert_grads[local_end:], pristine[local_end:])
-        del pristine
-        return ok
-    # Heavy shapes (i64 production case is affine): spot-check without a
-    # second full E×H×Hp allocation (~10.5 GiB at 7168x3072).
-    samples = []
-    if local_start > 0:
-        samples.extend([0, local_start - 1])
-    if local_end < E:
-        samples.extend([local_end, E - 1])
-    rows = (0, H // 2, H - 1)
-    device = remote_expert_grads.device
-    for expert in samples:
-        for row in rows:
-            expected = _affine_grad_row(expert, row, Hp, device)
-            if not torch.equal(remote_expert_grads[expert, row], expected):
-                return False
-    return True
-
-
 def _verify(rank, R, E, B, plan, grads_fn, slot_fn,
             remote_expert_grads, reduce_buffers, label):
     epn = E // R
     plan_cpu = plan.cpu()
     local_start = rank * epn
     local_end = local_start + epn
-    H = int(remote_expert_grads.shape[1])
-    Hp = int(remote_expert_grads.shape[2])
-    heavy = remote_expert_grads.element_size() * remote_expert_grads.numel() >= (4 << 30)
 
-    expected_local = _expected_for_rank(
-        rank, R, E, B, plan_cpu, grads_fn, slot_fn, heavy=heavy
-    )
+    expected_local = _expected_for_rank(rank, R, E, B, plan_cpu, grads_fn, slot_fn)
     actual_local = remote_expert_grads[local_start:local_end]
-    # Bitwise: the kernel accumulates each element serially in rb-ascending
-    # slot order seeded from the local grad value — the same fp32 add
-    # sequence as _expected_for_rank. Affine cases are exact regardless of
-    # order; the randn cases round and so genuinely pin that order. Loosen
-    # to allclose if the kernel ever reorders accumulation (atomics,
-    # multi-CTA slot splits, ...).
     ok_grads = torch.equal(actual_local, expected_local)
     del expected_local
 
-    ok_nonlocal = _nonlocal_pristine_ok(
-        rank, R, E, H, Hp, remote_expert_grads, grads_fn, heavy=heavy
-    )
+    pristine = grads_fn()
+    ok_nonlocal = torch.equal(
+        remote_expert_grads[:local_start], pristine[:local_start]
+    ) and torch.equal(remote_expert_grads[local_end:], pristine[local_end:])
+    del pristine
 
     zero_ok = True
     unchanged_ok = True
@@ -476,8 +379,6 @@ def dist_env():
     yield rank, R
 
     dist.barrier(device_ids=[rank])
-    if owns_process_group:
-        dist.destroy_process_group()
 
 
 def run_case(rank, R, case):
@@ -536,6 +437,8 @@ def run_case(rank, R, case):
     finally:
         buffer.destroy()
         release_nvl_dist_tensor(reduce_full)
+        torch.cuda.synchronize()
+        dist.barrier(device_ids=[rank])
         torch.cuda.empty_cache()
 
 

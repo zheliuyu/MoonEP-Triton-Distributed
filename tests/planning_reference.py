@@ -299,24 +299,71 @@ def launch_planning_torch_reference(
         dst[i] = dest * NvS + base_off + seg_pos
 
     dev = tokens_per_expert.device
-    dst_positive = dst.to(dev)
-    if materialize_dedup:
-        dst_out = encode_dst_duplicates(
-            dst_positive, rank=rank, R=R, S=S, K=K, NvS=NvS, group=group,
-        )
-        ref_dedup = build_reference_dedup_plan(
-            dst_positive, rank=rank, R=R, S=S, K=K, NvS=NvS, group=group, dev=dev,
-        )
-    else:
-        dst_out = dst_positive
-        ref_dedup = ReferenceDedupPlan(
-            dup_groups=torch.zeros(NvS, 3, dtype=torch.int32, device=dev),
-            dup_loffs=torch.zeros(NvS, dtype=torch.int32, device=dev),
-            dup_counts=torch.zeros(2, dtype=torch.int32, device=dev),
+    if not materialize_dedup:
+        return (
+            dst.to(dev),
+            cu_seqlens[rank].to(dev),
+            experts_to_copy.to(dev),
+            remote_stats_all[rank].to(dev),
+            zero_fill_by_rank[rank].to(dev),
+            ReferenceDedupPlan(
+                dup_groups=torch.zeros(NvS, 3, dtype=torch.int32, device=dev),
+                dup_loffs=torch.zeros(NvS, dtype=torch.int32, device=dev),
+                dup_counts=torch.zeros(2, dtype=torch.int32, device=dev),
+            ),
         )
 
+    dup_groups_by_rank = torch.zeros((R, NvS, 3), dtype=torch.int32)
+    dup_loffs_by_rank = torch.zeros((R, NvS), dtype=torch.int32)
+    dup_counts_by_rank = torch.zeros((R, 2), dtype=torch.int32)
+
+    dst_by_rank = dst.unsqueeze(dim=0).contiguous()
+    if R > 1:
+        gathered = [torch.zeros_like(dst, device=dev) for _ in range(R)]
+        dist.all_gather(gathered, dst.to(device=dev), group=group)
+        dst_by_rank = torch.stack(gathered).cpu()
+
+    for src_rank in range(R):
+        for s_tok in range(S):
+            base = s_tok * K
+            dst_vals = dst_by_rank[src_rank, base : base + K]
+            dests = torch.div(dst_vals, NvS, rounding_mode="floor")
+            loffs = dst_vals % NvS
+
+            groups: dict[int, list[int]] = {}
+            indices: dict[int, list[int]] = {}
+            for k in range(K):
+                dest = int(dests[k].item())
+                groups.setdefault(dest, []).append(int(loffs[k].item()))
+                indices.setdefault(dest, []).append(k)
+
+            for dest, group_loffs in groups.items():
+                dup_count = len(group_loffs) - 1
+                primary_loff = group_loffs[0]
+                if dup_count > 0:
+                    group_idx = int(dup_counts_by_rank[dest, 0].item())
+                    dup_start = int(dup_counts_by_rank[dest, 1].item())
+                    dup_groups_by_rank[dest, group_idx, 0] = primary_loff
+                    dup_groups_by_rank[dest, group_idx, 1] = dup_start
+                    dup_groups_by_rank[dest, group_idx, 2] = dup_count
+                    dup_loffs_by_rank[dest, dup_start : dup_start + dup_count] = (
+                        dup_loffs_by_rank.new_tensor(group_loffs[1:])
+                    )
+                    dup_counts_by_rank[dest, 0] += 1
+                    dup_counts_by_rank[dest, 1] += dup_count
+
+                for i in range(1, len(group_loffs)):
+                    if src_rank == rank:
+                        idx = base + indices[dest][i]
+                        dst[idx] = -dst[idx] - 1
+
+    ref_dedup = ReferenceDedupPlan(
+        dup_groups=dup_groups_by_rank[rank].to(dev),
+        dup_loffs=dup_loffs_by_rank[rank].to(dev),
+        dup_counts=dup_counts_by_rank[rank].to(dev),
+    )
     return (
-        dst_out,
+        dst.to(dev),
         cu_seqlens[rank].to(dev),
         experts_to_copy.to(dev),
         remote_stats_all[rank].to(dev),

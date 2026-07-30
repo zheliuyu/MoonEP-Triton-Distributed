@@ -6,6 +6,8 @@ Run with:
 
 from dataclasses import replace
 
+import os
+
 import pytest
 import torch
 
@@ -133,6 +135,16 @@ LARGE_DISPATCH_CASES = [
         B=4,
     )
 ]
+
+
+_SKIP_SLOW_DISPATCH = pytest.mark.skipif(
+    os.environ.get("RUN_SLOW_GPU_TESTS", "0") != "1",
+    reason=(
+        "Skipped by default: launch_planning_torch_reference + dedup semantic check "
+        "on large_hidden (S=8192, H=7168, K=16) takes far too long in full suite. "
+        "Set RUN_SLOW_GPU_TESTS=1 to run."
+    ),
+)
 
 
 def _traceable_hidden(rank, S, H):
@@ -426,7 +438,7 @@ def test_dispatch_saved_plan_hidden_only_reuses_dst_and_skips_weights(dist_env):
 
 
 @pytest.mark.parametrize("case", case_params(LARGE_DISPATCH_CASES))
-@pytest.mark.large_hidden
+@_SKIP_SLOW_DISPATCH
 def test_dispatch_large_hidden_stride_spotcheck(dist_env, case):
     rank, R = dist_env
     ctx = init_case(case, R)

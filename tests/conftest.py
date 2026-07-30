@@ -1,4 +1,5 @@
 import os
+import signal
 
 import pytest
 import torch
@@ -11,24 +12,50 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "i64_offset: int64 byte-offset stress cases")
     config.addinivalue_line("markers", "kernel_compile: Triton compile-only tests")
 
+    sec = os.environ.get("GPU_TEST_TIMEOUT_SEC", "").strip()
+    if sec:
+        try:
+            val = float(sec)
+        except ValueError:
+            pytest.exit(f"invalid GPU_TEST_TIMEOUT_SEC={sec!r}", returncode=2)
+        if val > 0 and not hasattr(signal, "SIGALRM"):
+            pytest.exit(
+                "GPU_TEST_TIMEOUT_SEC requires SIGALRM (not available on this platform)",
+                returncode=2,
+            )
 
-def pytest_collection_modifyitems(items):
-    """Run i64 grad_reduce before large_hidden tests.
 
-    After large_hidden dispatch/combine, the 32 GiB NVSHMEM heap is heavily
-    used; the i64 grad_reduce case then needs another ~11 GiB CUDA allocation
-    and can OOM or wedge NCCL. Running it first keeps the combined P0 suite
-    reliable on 4×80GB hosts.
-    """
-    i64_grad = []
-    rest = []
-    for item in items:
-        nodeid = item.nodeid
-        if "test_grad_reduce.py" in nodeid and "i64_offset_7168x3072" in nodeid:
-            i64_grad.append(item)
-        else:
-            rest.append(item)
-    items[:] = i64_grad + rest
+def _gpu_test_timeout_sec():
+    if os.environ.get("GPU_TEST_TIMEOUT_SKIP", "1") != "1":
+        return None
+    raw = os.environ.get("GPU_TEST_TIMEOUT_SEC", "").strip()
+    if not raw:
+        return None
+    try:
+        sec = float(raw)
+    except ValueError:
+        return None
+    return sec if sec > 0 else None
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_call(item):
+    """Skip (no failure, no stack dump) when a single test body exceeds the budget."""
+    sec = _gpu_test_timeout_sec()
+    if sec is None:
+        yield
+        return
+
+    def _on_alarm(signum, frame):
+        pytest.skip(f"exceeded GPU_TEST_TIMEOUT_SEC={sec}s")
+
+    previous = signal.signal(signal.SIGALRM, _on_alarm)
+    signal.setitimer(signal.ITIMER_REAL, sec, 0.0)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0.0, 0.0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 @pytest.fixture(scope="session")

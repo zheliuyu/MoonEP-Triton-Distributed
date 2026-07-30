@@ -78,6 +78,7 @@ LARGE_COMBINE_CASES = [
         H=7168,
         num_sms=32,
         B=4,
+        min_R=4,
     )
 ]
 
@@ -350,7 +351,6 @@ def test_buffer_combine_async_gathers_weights(dist_env):
 
 
 @pytest.mark.parametrize("case", case_params(LARGE_COMBINE_CASES))
-@pytest.mark.large_hidden
 def test_combine_large_hidden_stride_identity(dist_env, case):
     rank, R = dist_env
     ctx = init_case(case, R)
