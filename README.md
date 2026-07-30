@@ -1,4 +1,4 @@
-# MoonEP-Triton-D
+# MoonEP-Triton-DisTributed
 
 MoonEP reimplemented on [Triton-distributed](https://github.com/ByteDance-Seed/Triton-distributed) with NVSHMEM symmetric memory.
 
