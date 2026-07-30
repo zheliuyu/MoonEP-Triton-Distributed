@@ -12,6 +12,25 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "kernel_compile: Triton compile-only tests")
 
 
+def pytest_collection_modifyitems(items):
+    """Run i64 grad_reduce before large_hidden tests.
+
+    After large_hidden dispatch/combine, the 32 GiB NVSHMEM heap is heavily
+    used; the i64 grad_reduce case then needs another ~11 GiB CUDA allocation
+    and can OOM or wedge NCCL. Running it first keeps the combined P0 suite
+    reliable on 4×80GB hosts.
+    """
+    i64_grad = []
+    rest = []
+    for item in items:
+        nodeid = item.nodeid
+        if "test_grad_reduce.py" in nodeid and "i64_offset_7168x3072" in nodeid:
+            i64_grad.append(item)
+        else:
+            rest.append(item)
+    items[:] = i64_grad + rest
+
+
 @pytest.fixture(scope="session")
 def gpu_count():
     try:
@@ -23,13 +42,15 @@ def gpu_count():
 @pytest.fixture(autouse=True)
 def cleanup_moonep_buffers():
     yield
-    import torch
+    import gc
 
     from tests.kernel_test_utils import destroy_active_buffers
 
     destroy_active_buffers()
     if torch.cuda.is_available():
         torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+    gc.collect()
 
 
 @pytest.fixture(scope="session")

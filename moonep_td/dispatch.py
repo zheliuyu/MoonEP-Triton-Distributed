@@ -55,7 +55,8 @@ def _kernels():
         loff = raw - dest_rank * NvS
         if dst_val >= 0:
             remote_buf = dl.symm_at(hidden_buf_ptr, dest_rank)
-            dst_row = remote_buf + (dest_rank * NvS_padded + loff) * stride_buf_row
+            row_idx = (dest_rank * NvS_padded + loff).to(tl.int64)
+            dst_row = remote_buf + row_idx * stride_buf_row
             for h_off in range(0, H, BLOCK_H):
                 cols = h_off + tl.arange(0, BLOCK_H)
                 mask = cols < H
@@ -79,9 +80,9 @@ def _kernels():
         n_pad = tl.load(zero_fill_ptr + g * 2 + 1)
         if n_pad <= 0:
             return
-        row_base = (rank * NvS_padded + pad_start) * stride_buf_row
+        row_base = (rank * NvS_padded + pad_start).to(tl.int64) * stride_buf_row
         for row in range(n_pad):
-            dst_row = hidden_buf_ptr + row_base + row * stride_buf_row
+            dst_row = hidden_buf_ptr + row_base + row.to(tl.int64) * stride_buf_row
             for h_off in range(0, H, BLOCK_H):
                 cols = h_off + tl.arange(0, BLOCK_H)
                 mask = cols < H

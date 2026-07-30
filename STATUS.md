@@ -102,9 +102,10 @@ bash scripts/run_gpu_tests.sh  # 67 passed, 1 skipped, 6 deselected
 | 项 | 说明 | 如何验证 |
 |----|------|----------|
 | **8-GPU 规模** | `test_8rank_smoke`、8-rank dispatch/combine 路径 | `RUN_8RANK_TESTS=1 NPROC=8 bash scripts/run_gpu_tests.sh`（需 ≥8 GPU） |
-| **4-GPU planning case** | `step1_segment_tail_full_tile`（min_R=4） | `NPROC=4 torchrun … pytest tests/test_planning.py -k step1_segment_tail` |
-| **大 hidden（H=7168）** | NVSHMEM 显存压力；V100 32GB 默认 filter 排除 | `PYTEST_FILTER="not i64_offset and not 8rank_smoke" bash scripts/run_gpu_tests.sh`（需 A100 80GB 更稳） |
-| **i64 字节偏移** | grad_reduce / prefetch 大 H×Hp 寻址 | `PYTEST_FILTER="" bash scripts/run_gpu_tests.sh`（需 A100 80GB） |
+| **4-GPU planning case** | `step1_segment_tail_full_tile`（min_R=4） | 见下行 4×A800 一键命令 |
+| **大 hidden（H=7168）** | NVSHMEM 显存压力；V100 32GB 默认 filter 排除 | 见下行 4×A800 一键命令 |
+| **i64 字节偏移** | grad_reduce / prefetch 大 H×Hp 寻址 | 见下行 4×A800 一键命令 |
+| **4×A800 扩展（P0 合并）** | planning R=4 + large_hidden + i64；跳过 8-rank | `NPROC=4 PYTEST_FILTER="not 8rank_smoke" bash scripts/run_gpu_tests.sh`（自动设 `NVSHMEM_SYMMETRIC_SIZE=20G`） |
 
 ### P1 — 功能/parity 缺口（相对 MoonEP 原版）
 
@@ -188,7 +189,7 @@ bash scripts/run_gpu_tests.sh  # 67 passed, 1 skipped, 6 deselected
 ## 建议下一步（提交后）
 
 1. 在有 **8×GPU** 的机器上：`RUN_8RANK_TESTS=1 bash scripts/run_gpu_tests.sh`
-2. 在有 **A100 80GB** 的机器上：`PYTEST_FILTER="" bash scripts/run_gpu_tests.sh`
+2. 在有 **A100/A800 80GB（4 卡）** 的机器上：`NPROC=4 PYTEST_FILTER="not 8rank_smoke" bash scripts/run_gpu_tests.sh`
 3. 移植 `bench_vs_deepep.py` 并记录性能基线
 4. Hopper 上评估完整 TMA pipeline（替代当前 warp-only `MOONEP_TD_PIPELINE`）
 

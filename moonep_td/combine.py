@@ -46,7 +46,8 @@ def _kernel():
                     )
                 if dst_val >= 0:
                     remote_buf = dl.symm_at(hidden_buf_ptr, dest_rank)
-                    src_row = remote_buf + (dest_rank * NvS_padded + loff) * stride_buf_row
+                    row_idx = (dest_rank * NvS_padded + loff).to(tl.int64)
+                    src_row = remote_buf + row_idx * stride_buf_row
                     acc += tl.load(src_row + cols, mask=mask, other=0).to(tl.float32)
             tl.store(dst_row + cols, acc.to(tl.bfloat16), mask=mask)
 

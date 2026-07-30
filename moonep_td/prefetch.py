@@ -48,12 +48,17 @@ def _kernel():
                 n0 = tn * BLOCK_N
                 cols = n0 + tl.arange(0, BLOCK_N)
                 col_mask = cols < Hp
+                # int64 offsets: expert * H * Hp crosses 2^31 at production shapes.
                 expert64 = expert.to(tl.int64)
+                stride_e64 = stride_e.to(tl.int64)
+                stride_h64 = stride_h.to(tl.int64)
+                stride_b64 = stride_b.to(tl.int64)
+                b64 = b.to(tl.int64)
                 for mi in tl.static_range(BLOCK_M):
-                    row = m0 + mi
+                    row = (m0 + mi).to(tl.int64)
                     if row < H:
-                        src_row = remote_ptr + expert64 * stride_e + row * stride_h
-                        dst_row = prefetch_ptr + b * stride_b + row * stride_h
+                        src_row = remote_ptr + expert64 * stride_e64 + row * stride_h64
+                        dst_row = prefetch_ptr + b64 * stride_b64 + row * stride_h64
                         vals = tl.load(src_row + cols, mask=col_mask, other=0)
                         tl.store(dst_row + cols, vals, mask=col_mask)
 
