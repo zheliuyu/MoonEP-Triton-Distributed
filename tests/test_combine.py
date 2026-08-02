@@ -16,8 +16,8 @@ from tests.kernel_test_utils import (
     gather_tensor,
     init_case,
     make_topk,
+    zero_local_nvl_shards,
 )
-
 
 COMBINE_CASES = [
     KernelCase("balanced", S=256, K=8, epn=16, H=128, num_sms=32),
@@ -78,7 +78,6 @@ LARGE_COMBINE_CASES = [
         H=7168,
         num_sms=32,
         B=4,
-        min_R=4,
     )
 ]
 
@@ -107,24 +106,9 @@ def _dispatch_inputs(ctx, case, rank, R, seed=0):
     launch_dispatch_epilogue(ctx, plan)
     hidden_user = torch.empty_like(ctx["hidden_buf_local"])
     hidden_user.copy_(ctx["hidden_buf_local"])
-    weights_user = torch.empty(
-        (int(ctx["NvS"]),), dtype=torch.float32, device=hidden_user.device
-    )
+    weights_user = torch.empty((int(ctx["NvS"]),), dtype=torch.float32, device=hidden_user.device)
     weights_user.copy_(ctx["weights_buf_local"].view(torch.float32))
     return hidden, weights, dst, cu_seqlens, expert_ids, plan, hidden_user, weights_user
-
-
-def _zero_local_nvl_shards(ctx):
-    """Clear this PE's NVSHMEM symmetric shards (combine reads remote peers)."""
-    import torch.distributed as dist
-
-    rank = int(ctx["rank"])
-    nvsp = int(ctx["NvS_padded"])
-    meta_p = int(ctx["meta_chunk_padded"])
-    ctx["hidden_buf"][rank * nvsp:(rank + 1) * nvsp].zero_()
-    ctx["meta_buf"][rank * meta_p:(rank + 1) * meta_p].zero_()
-    if dist.is_initialized():
-        dist.barrier(device_ids=[rank])
 
 
 def _combine_full(ctx, case, plan, hidden_user, weights_user=None):
@@ -132,9 +116,7 @@ def _combine_full(ctx, case, plan, hidden_user, weights_user=None):
     from moonep_td.combine_prologue import launch_combine_prologue
     from moonep_td.inter_rank_sync import launch_inter_rank_sync
 
-    output = torch.empty(
-        case.S, case.H, dtype=torch.bfloat16, device=hidden_user.device
-    )
+    output = torch.empty(case.S, case.H, dtype=torch.bfloat16, device=hidden_user.device)
     launch_inter_rank_sync(ctx)
     # zero_copy=False boundary: stage the combine inputs into the NVL shard,
     # then accumulate duplicate rows into their primary in place.
@@ -146,9 +128,7 @@ def _combine_full(ctx, case, plan, hidden_user, weights_user=None):
         launch_combine(ctx, output, plan.dst)
         return output, None
 
-    output_sk = torch.empty(
-        case.S, case.K, dtype=torch.float32, device=hidden_user.device
-    )
+    output_sk = torch.empty(case.S, case.K, dtype=torch.float32, device=hidden_user.device)
     launch_combine(ctx, output, plan.dst, output_sk=output_sk)
     return output, output_sk
 
@@ -185,16 +165,14 @@ def _per_expert_scale(buf, cu_seqlens, expert_ids):
         prev = cur
 
 
-def _combine_global_reference(ctx, case, rank, R, hidden, dst, cu_seqlens,
-                              experts_to_copy, expert_fn):
+def _combine_global_reference(ctx, case, rank, R, hidden, dst, cu_seqlens, experts_to_copy, expert_fn):
     nvs_stride = int(ctx["NvS"])
     NvS_padded = int(ctx["NvS_padded"])
     all_hidden = gather_tensor(hidden.contiguous(), R)
     all_dst = gather_tensor(dst.reshape(case.S, case.K).contiguous(), R)
     all_cu = gather_tensor(cu_seqlens.contiguous(), R)
 
-    global_buf = torch.zeros(R, NvS_padded, case.H, dtype=torch.bfloat16,
-                             device=f"cuda:{rank}")
+    global_buf = torch.zeros(R, NvS_padded, case.H, dtype=torch.bfloat16, device=f"cuda:{rank}")
     for src_r in range(R):
         for s in range(case.S):
             for k in range(case.K):
@@ -205,9 +183,7 @@ def _combine_global_reference(ctx, case, rank, R, hidden, dst, cu_seqlens,
                 global_buf[dest_rank, local_off] = all_hidden[src_r, s]
 
     for dest_r in range(R):
-        expert_ids = _expert_ids_from_experts_to_copy(
-            ctx, all_cu[dest_r], experts_to_copy[dest_r]
-        )
+        expert_ids = _expert_ids_from_experts_to_copy(ctx, all_cu[dest_r], experts_to_copy[dest_r])
         expert_fn(global_buf[dest_r], all_cu[dest_r], expert_ids)
 
     ref = torch.zeros(case.S, case.H, dtype=torch.float32, device=f"cuda:{rank}")
@@ -226,9 +202,7 @@ def _combine_global_reference(ctx, case, rank, R, hidden, dst, cu_seqlens,
 def test_combine_identity_round_trip(dist_env, case):
     rank, R = dist_env
     ctx = init_case(case, R)
-    hidden, _weights, _dst, _cu, _expert_ids, plan, hidden_user, _weights_user = _dispatch_inputs(
-        ctx, case, rank, R
-    )
+    hidden, _weights, _dst, _cu, _expert_ids, plan, hidden_user, _weights_user = _dispatch_inputs(ctx, case, rank, R)
 
     output, _ = _combine_full(ctx, case, plan, hidden_user)
     ref = (hidden.float() * case.K).to(torch.bfloat16)
@@ -252,15 +226,11 @@ def test_combine_matches_global_reference(dist_env, case, expert_name, expert_fn
 
     expert_fn(hidden_user, cu_seqlens, expert_ids)
     torch.cuda.synchronize()
-    ref = _combine_global_reference(
-        ctx, case, rank, R, hidden, dst, cu_seqlens, plan.experts_to_copy, expert_fn
-    )
+    ref = _combine_global_reference(ctx, case, rank, R, hidden, dst, cu_seqlens, plan.experts_to_copy, expert_fn)
 
     output, _ = _combine_full(ctx, case, plan, hidden_user)
     if use_ulp:
-        assert_ulp_all_ranks(
-            f"{case.name} {expert_name} combine", output, ref, rank, R, max_ulps=1
-        )
+        assert_ulp_all_ranks(f"{case.name} {expert_name} combine", output, ref, rank, R, max_ulps=1)
     else:
         assert_close_all_ranks(f"{case.name} {expert_name} combine", output, ref, rank, R)
 
@@ -298,15 +268,13 @@ def test_buffer_combine_stages_external_buffers_and_gathers_weights(dist_env):
 
     ref_out, ref_weights = _combine_full(ctx, case, plan, hidden_user, weights_user)
 
-    # Re-dispatch so every PE's NVL shard is fresh before we zero and stage
-    # external buffers (combine gathers remote rows via NVSHMEM).
     _hidden, weights, _dst, _cu, _expert_ids, plan, hidden_user, weights_user = _dispatch_inputs(
         ctx, case, rank, R, seed=200
     )
 
     staged_hidden = hidden_user.clone()
     staged_weights = weights_user.clone()
-    _zero_local_nvl_shards(ctx)
+    zero_local_nvl_shards(ctx)
 
     out, out_weights, _ = buffer.combine(
         plan=plan,
@@ -354,9 +322,7 @@ def test_buffer_combine_async_gathers_weights(dist_env):
 def test_combine_large_hidden_stride_identity(dist_env, case):
     rank, R = dist_env
     ctx = init_case(case, R)
-    hidden, _weights, _dst, _cu, _expert_ids, plan, hidden_user, _weights_user = _dispatch_inputs(
-        ctx, case, rank, R
-    )
+    hidden, _weights, _dst, _cu, _expert_ids, plan, hidden_user, _weights_user = _dispatch_inputs(ctx, case, rank, R)
 
     output, _ = _combine_full(ctx, case, plan, hidden_user)
     ref = (hidden.float() * case.K).to(torch.bfloat16)
@@ -370,9 +336,7 @@ def test_combine_rejects_bad_inputs(dist_env):
     case = KernelCase("bad_inputs", S=4, K=2, epn=2, H=128, num_sms=1)
     ctx = init_case(case, R)
     buffer = ctx["_buffer"]
-    _hidden, _weights, dst, _cu, _expert_ids, plan, hidden_user, _weights_user = _dispatch_inputs(
-        ctx, case, rank, R
-    )
+    _hidden, _weights, dst, _cu, _expert_ids, plan, hidden_user, _weights_user = _dispatch_inputs(ctx, case, rank, R)
     output = torch.empty(case.S, case.H, dtype=torch.bfloat16, device=f"cuda:{rank}")
 
     with pytest.raises(TypeError, match="hidden_sh"):
@@ -385,11 +349,8 @@ def test_combine_rejects_bad_inputs(dist_env):
         buffer.combine(
             plan=plan,
             hidden_nvsh=hidden_user,
-            route_weights_nvs=torch.empty(
-                case.S, case.K, dtype=torch.float32, device=f"cuda:{rank}"
-            ),
+            route_weights_nvs=torch.empty(case.S, case.K, dtype=torch.float32, device=f"cuda:{rank}"),
         )
     with pytest.raises(AssertionError, match="output_sk"):
-        bad_output_sk = torch.empty(case.S, case.K, dtype=torch.bfloat16,
-                                    device=f"cuda:{rank}")
+        bad_output_sk = torch.empty(case.S, case.K, dtype=torch.bfloat16, device=f"cuda:{rank}")
         launch_combine(ctx, output, dst, output_sk=bad_output_sk)

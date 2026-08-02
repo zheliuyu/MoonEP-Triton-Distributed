@@ -32,13 +32,9 @@ def generate_topk_routing(S, K, E, R, bias_ratio, dev, seed, rank=0):
         perm = torch.randperm(epn, device=dev, generator=g_local)
         topk = (target_rank * epn + perm[target_local]).to(torch.int32)
     else:
-        logits = torch.exp(torch.normal(
-            mean=0.0, std=bias_ratio, size=(E,), device=dev, generator=g_shared
-        ))
+        logits = torch.exp(torch.normal(mean=0.0, std=bias_ratio, size=(E,), device=dev, generator=g_shared))
         probs = logits[None, :].expand(S, E)
-        topk = torch.multinomial(
-            probs, K, replacement=False, generator=g_local
-        ).to(torch.int32)
+        topk = torch.multinomial(probs, K, replacement=False, generator=g_local).to(torch.int32)
 
     tpe = torch.bincount(topk.flatten(), minlength=E).to(torch.int32)
     return topk, tpe

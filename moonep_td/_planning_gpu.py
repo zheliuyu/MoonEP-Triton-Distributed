@@ -20,6 +20,7 @@ def _peer_meta_slice(meta: torch.Tensor, peer_rank: int, local_rank: int) -> tor
     if peer_rank == local_rank:
         return meta
     import nvshmem.core as nvs
+
     return nvs.get_peer_tensor(meta, peer_rank)
 
 
@@ -47,6 +48,7 @@ def _gather_rows_from_meta(
 @functools.lru_cache(maxsize=None)
 def _publish_tpe_kernel():
     import triton.language as tl
+
     from moonep_td._triton_runtime import triton_dist
 
     td = triton_dist()
@@ -65,6 +67,7 @@ def _publish_tpe_kernel():
 @functools.lru_cache(maxsize=None)
 def _publish_dst_scratch_kernel():
     import triton.language as tl
+
     from moonep_td._triton_runtime import triton_dist
 
     td = triton_dist()
@@ -119,6 +122,7 @@ def _per_expert_local_rank(experts: torch.Tensor) -> torch.Tensor:
 def _publish_src_info_kernel():
     import triton.language as tl
     import triton_dist.language as dl
+
     from moonep_td._triton_runtime import triton_dist
 
     td = triton_dist()
@@ -152,6 +156,7 @@ def _publish_src_info_kernel():
 @functools.lru_cache(maxsize=None)
 def _compute_dst_kernel(R: int):
     import triton.language as tl
+
     from moonep_td._triton_runtime import triton_dist
 
     td = triton_dist()
@@ -303,6 +308,7 @@ def encode_dst_duplicates_gpu(
 @functools.lru_cache(maxsize=None)
 def _balance_distribute_kernel(R: int):
     import triton.language as tl
+
     from moonep_td._triton_runtime import triton_dist
 
     td = triton_dist()
@@ -482,8 +488,8 @@ def build_per_rank_layout_gpu(
         pref_counts = torch.zeros(B, dtype=torch.int32, device=device)
         if bool(valid_b.any().item()):
             pref_counts[valid_b] = cnt_d[eid[valid_b].to(torch.int64)]
-        counts[E:E + B] = pref_counts
-        experts_g[E:E + B] = eid
+        counts[E : E + B] = pref_counts
+        experts_g[E : E + B] = eid
 
         padded = torch.zeros(g, dtype=torch.int32, device=device)
         pos = counts > 0
@@ -496,7 +502,9 @@ def build_per_rank_layout_gpu(
         active = counts > 0
         if bool(active.any().item()):
             expert_off[d].scatter_(
-                0, experts_g[active].to(torch.int64), starts[active],
+                0,
+                experts_g[active].to(torch.int64),
+                starts[active],
             )
 
         if d == rank:
@@ -538,7 +546,14 @@ def launch_planning_gpu(
     ctx["alloc"].copy_(alloc.t().reshape(-1))
 
     cu, etc, rs, zfr, expert_off = build_per_rank_layout_gpu(
-        alloc, R, E, B, epn, NvS, token_padding, rank,
+        alloc,
+        R,
+        E,
+        B,
+        epn,
+        NvS,
+        token_padding,
+        rank,
     )
 
     tpe_cumsum = tpe.cumsum(dim=0)
@@ -546,12 +561,24 @@ def launch_planning_gpu(
     local_cnt = _per_expert_local_rank(topk.to(torch.int32))
 
     dst_pos = compute_dst_positive_gpu(
-        topk, local_cnt, tpe_cumsum, alloc_cumsum, expert_off, rank, NvS,
+        topk,
+        local_cnt,
+        tpe_cumsum,
+        alloc_cumsum,
+        expert_off,
+        rank,
+        NvS,
     )
 
     publish_src_info_to_meta_gpu(ctx, dst_pos)
     dst = encode_dst_duplicates_gpu(
-        dst_pos, ctx, rank=rank, R=R, S=S, K=K, NvS=NvS,
+        dst_pos,
+        ctx,
+        rank=rank,
+        R=R,
+        S=S,
+        K=K,
+        NvS=NvS,
     )
 
     plan.dst.copy_(dst)

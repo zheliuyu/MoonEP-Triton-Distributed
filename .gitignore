@@ -1,8 +1,11 @@
 __pycache__/
-*.py[cod]
-*$py.class
-*.egg-info/
-.pytest_cache/
-triton_cache/
+*.pyc
 *.so
+*.egg-info/
+*.ncu-rep
+*.nsys-rep
+build/**
+.pytest_cache/
+.ruff_cache/
+triton_cache/
 .DS_Store

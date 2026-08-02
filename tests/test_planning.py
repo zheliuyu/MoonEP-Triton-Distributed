@@ -5,6 +5,7 @@ Run with:
 """
 
 import pytest
+
 from tests.kernel_test_utils import (
     DEFAULT_TOKEN_PADDING,
     KernelCase,
@@ -17,7 +18,6 @@ from tests.kernel_test_utils import (
     skip_if_unsupported_world_size,
 )
 from tests.planning_reference import launch_planning_torch_reference
-
 
 PLANNING_CASES = [
     KernelCase(
@@ -268,10 +268,7 @@ def test_planning_matches_reference_and_invariants(dist_env, case):
     topk, tpe = make_topk(case, rank, R)
 
     plan, cu_seqlens = allocate_planning_outputs(ctx)
-    assert (
-        launch_planning(ctx, topk.reshape(-1).contiguous(), tpe, cu_seqlens, plan)
-        is None
-    )
+    assert launch_planning(ctx, topk.reshape(-1).contiguous(), tpe, cu_seqlens, plan) is None
     dst = plan.dst
     experts_to_copy = plan.experts_to_copy
     remote_stats = plan.remote_stats
@@ -285,18 +282,10 @@ def test_planning_matches_reference_and_invariants(dist_env, case):
     ) = launch_planning_torch_reference(ctx, topk, tpe)
 
     assert_tensor_equal_all_ranks("cu_seqlens", cu_seqlens, ref_cu_seqlens, rank, R)
-    assert_tensor_equal_all_ranks(
-        "zero_fill_ranges", plan.zero_fill_ranges, ref_zero_fill_ranges, rank, R
-    )
-    assert_tensor_equal_all_ranks(
-        "experts_to_copy", experts_to_copy, ref_experts_to_copy, rank, R
-    )
-    assert_tensor_equal_all_ranks(
-        "remote_stats", remote_stats, ref_remote_stats, rank, R
-    )
-    assert_tensor_equal_all_ranks(
-        "dst", dst.reshape(case.S, case.K), ref_dst.reshape(case.S, case.K), rank, R
-    )
+    assert_tensor_equal_all_ranks("zero_fill_ranges", plan.zero_fill_ranges, ref_zero_fill_ranges, rank, R)
+    assert_tensor_equal_all_ranks("experts_to_copy", experts_to_copy, ref_experts_to_copy, rank, R)
+    assert_tensor_equal_all_ranks("remote_stats", remote_stats, ref_remote_stats, rank, R)
+    assert_tensor_equal_all_ranks("dst", dst.reshape(case.S, case.K), ref_dst.reshape(case.S, case.K), rank, R)
 
     errors = planning_invariant_errors(case, ctx, dst, cu_seqlens, experts_to_copy)
     assert_all_ranks(

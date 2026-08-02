@@ -35,7 +35,6 @@ from moonep_td.buffer import (
 )
 from moonep_td.grad_reduce import launch_grad_reduce
 
-
 # --------------------------------------------------------------------------
 # plan builders. Plans are global [R, B] tables, so every builder must be a
 # deterministic function of (R, B, epn, seed) only — never of the local rank.
@@ -125,14 +124,10 @@ PLAN_BUILDERS = {
 
 
 def _grad_values(E, H, Hp, dev):
-    out = torch.empty((E, H, Hp), dtype=torch.float32, device=dev)
-    expert = torch.arange(E, dtype=torch.float32, device=dev).mul_(17.0)
-    row = torch.arange(H, dtype=torch.float32, device=dev).mul_(0.125)
-    col = torch.arange(Hp, dtype=torch.float32, device=dev).mul_(0.0078125)
-    out.copy_(expert.view(E, 1, 1))
-    out.add_(row.view(1, H, 1))
-    out.add_(col.view(1, 1, Hp))
-    return out
+    expert = torch.arange(E, dtype=torch.float32, device=dev).view(E, 1, 1)
+    row = torch.arange(H, dtype=torch.float32, device=dev).view(1, H, 1)
+    col = torch.arange(Hp, dtype=torch.float32, device=dev).view(1, 1, Hp)
+    return expert * 17.0 + row * 0.125 + col * 0.0078125
 
 
 def _slot_values(rank, B, H, Hp, dev):
@@ -178,9 +173,7 @@ def _expected_for_rank(rank, R, E, B, plan_cpu, grads_fn, slot_fn):
             if expert >= 0:
                 expected[expert].add_(slot_vals[b])
     epn = E // R
-    local = expected[rank * epn : (rank + 1) * epn].contiguous()
-    del expected
-    return local
+    return expected[rank * epn : (rank + 1) * epn].contiguous()
 
 
 def _assert_all_ranks(ok, rank, label):
@@ -189,8 +182,7 @@ def _assert_all_ranks(ok, rank, label):
     assert int(ok_tensor.item()) == 1, label
 
 
-def _verify(rank, R, E, B, plan, grads_fn, slot_fn,
-            remote_expert_grads, reduce_buffers, label):
+def _verify(rank, R, E, B, plan, grads_fn, slot_fn, remote_expert_grads, reduce_buffers, label):
     epn = E // R
     plan_cpu = plan.cpu()
     local_start = rank * epn
@@ -198,14 +190,18 @@ def _verify(rank, R, E, B, plan, grads_fn, slot_fn,
 
     expected_local = _expected_for_rank(rank, R, E, B, plan_cpu, grads_fn, slot_fn)
     actual_local = remote_expert_grads[local_start:local_end]
+    # Bitwise: the kernel accumulates each element serially in rb-ascending
+    # slot order seeded from the local grad value — the same fp32 add
+    # sequence as _expected_for_rank. Affine cases are exact regardless of
+    # order; the randn cases round and so genuinely pin that order. Loosen
+    # to allclose if the kernel ever reorders accumulation (atomics,
+    # multi-CTA slot splits, ...).
     ok_grads = torch.equal(actual_local, expected_local)
-    del expected_local
 
     pristine = grads_fn()
-    ok_nonlocal = torch.equal(
-        remote_expert_grads[:local_start], pristine[:local_start]
-    ) and torch.equal(remote_expert_grads[local_end:], pristine[local_end:])
-    del pristine
+    ok_nonlocal = torch.equal(remote_expert_grads[:local_start], pristine[:local_start]) and torch.equal(
+        remote_expert_grads[local_end:], pristine[local_end:]
+    )
 
     zero_ok = True
     unchanged_ok = True
@@ -225,10 +221,7 @@ def _verify(rank, R, E, B, plan, grads_fn, slot_fn,
 
     ok = bool(ok_grads and ok_nonlocal and zero_ok and unchanged_ok)
     if not ok:
-        print(
-            f"[rank {rank}] {label}: grads={ok_grads} nonlocal={ok_nonlocal} "
-            f"zero={zero_ok} unchanged={unchanged_ok}"
-        )
+        print(f"[rank {rank}] {label}: grads={ok_grads} nonlocal={ok_nonlocal} zero={zero_ok} unchanged={unchanged_ok}")
     _assert_all_ranks(ok, rank, label)
 
 
@@ -379,6 +372,8 @@ def dist_env():
     yield rank, R
 
     dist.barrier(device_ids=[rank])
+    if owns_process_group:
+        dist.destroy_process_group()
 
 
 def run_case(rank, R, case):
@@ -394,8 +389,7 @@ def run_case(rank, R, case):
     reduce_full = create_nvl_dist_tensor([B, H, Hp], torch.float32, rank, R)
     reduce_buffers = view_nvl_dist_rows(reduce_full, R, B)
     plan = PLAN_BUILDERS[case.get("plan", "ring")](R, B, epn, dev, seed)
-    grads_fn, slot_fn = _make_data_fns(
-        case.get("data", "affine"), rank, R, E, B, H, Hp, dev, seed)
+    grads_fn, slot_fn = _make_data_fns(case.get("data", "affine"), rank, R, E, B, H, Hp, dev, seed)
 
     buffer = Buffer(S=128, H=H, K=1, E=E, num_ep_ranks=R, num_sms=num_sms, B=B)
     try:
@@ -415,30 +409,34 @@ def run_case(rank, R, case):
             plan,
             rank=rank,
             num_sms=num_sms,
-            meta_buf=ctx['meta_buf'],
-            meta_stride=ctx['meta_chunk_padded'],
-            barrier_off=ctx['BARRIER_OFF'],
-            grid_sync_bar=ctx['grid_sync_bar'],
+            meta_buf=ctx["meta_buf"],
+            meta_stride=ctx["meta_chunk_padded"],
+            barrier_off=ctx["BARRIER_OFF"],
+            grid_sync_bar=ctx["grid_sync_bar"],
         )
         torch.cuda.synchronize()
         dist.barrier(device_ids=[rank])
 
-        _verify(rank, R, E, B, plan, grads_fn, slot_fn,
-                remote_expert_grads, reduce_buffers,
-                f"{case['name']} grad_reduce failed")
+        _verify(
+            rank,
+            R,
+            E,
+            B,
+            plan,
+            grads_fn,
+            slot_fn,
+            remote_expert_grads,
+            reduce_buffers,
+            f"{case['name']} grad_reduce failed",
+        )
 
         if rank == 0:
-            print(
-                f"  [PASS] {case['name']}: R={R}, E={E}, B={B}, "
-                f"H={H}, Hp={Hp}, num_sms={num_sms}"
-            )
+            print(f"  [PASS] {case['name']}: R={R}, E={E}, B={B}, H={H}, Hp={Hp}, num_sms={num_sms}")
 
         dist.barrier(device_ids=[rank])
     finally:
         buffer.destroy()
         release_nvl_dist_tensor(reduce_full)
-        torch.cuda.synchronize()
-        dist.barrier(device_ids=[rank])
         torch.cuda.empty_cache()
 
 
@@ -475,8 +473,7 @@ def test_grad_reduce_repeated_launch(dist_env):
         rounds = [("random", 11), ("empty", 0), ("random", 12)]
         for it, (plan_name, plan_seed) in enumerate(rounds):
             plan = PLAN_BUILDERS[plan_name](R, B, epn, dev, plan_seed)
-            grads_fn, slot_fn = _make_data_fns(
-                "randn", rank, R, E, B, H, Hp, dev, seed=50 + it)
+            grads_fn, slot_fn = _make_data_fns("randn", rank, R, E, B, H, Hp, dev, seed=50 + it)
 
             remote_expert_grads = grads_fn()
             reduce_buffers[rank].copy_(slot_fn(rank))
@@ -489,23 +486,33 @@ def test_grad_reduce_repeated_launch(dist_env):
                 plan,
                 rank=rank,
                 num_sms=num_sms,
-                meta_buf=ctx['meta_buf'],
-                meta_stride=ctx['meta_chunk_padded'],
-                barrier_off=ctx['BARRIER_OFF'],
-                grid_sync_bar=ctx['grid_sync_bar'],
+                meta_buf=ctx["meta_buf"],
+                meta_stride=ctx["meta_chunk_padded"],
+                barrier_off=ctx["BARRIER_OFF"],
+                grid_sync_bar=ctx["grid_sync_bar"],
             )
             torch.cuda.synchronize()
             dist.barrier(device_ids=[rank])
 
-            _verify(rank, R, E, B, plan, grads_fn, slot_fn,
-                    remote_expert_grads, reduce_buffers,
-                    f"repeated_launch round {it} ({plan_name}) failed")
+            _verify(
+                rank,
+                R,
+                E,
+                B,
+                plan,
+                grads_fn,
+                slot_fn,
+                remote_expert_grads,
+                reduce_buffers,
+                f"repeated_launch round {it} ({plan_name}) failed",
+            )
 
         if rank == 0:
             print(f"  [PASS] repeated_launch: R={R}, rounds={len(rounds)}")
         dist.barrier(device_ids=[rank])
     finally:
         buffer.destroy()
+        release_nvl_dist_tensor(reduce_full)
 
 
 if __name__ == "__main__":

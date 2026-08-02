@@ -7,13 +7,13 @@ import functools
 import torch
 
 from moonep_td._common import cached_block_h, launch_cross_rank_barrier
-from moonep_td._pipeline import pipeline_enabled
 from moonep_td._dedup_builder import launch_dedup_builder
+from moonep_td._pipeline import pipeline_enabled
 from moonep_td.planning import MoonEPCommPlan
 
 
 def _check_dispatch_plan(ctx: dict, hidden_sh: torch.Tensor, plan: MoonEPCommPlan) -> None:
-    S, K, N = int(ctx["S"]), int(ctx["K"]), int(ctx["S"]) * int(ctx["K"])
+    _, K, N = int(ctx["S"]), int(ctx["K"]), int(ctx["S"]) * int(ctx["K"])
     R, E, B, NvS = int(ctx["R"]), int(ctx["E"]), int(ctx.get("B", 0)), int(ctx["NvS"])
     dev = hidden_sh.device
     assert plan.N == N and plan.R == R and plan.K == K and plan.NvS == NvS
@@ -34,15 +34,29 @@ def _check_dispatch_plan(ctx: dict, hidden_sh: torch.Tensor, plan: MoonEPCommPla
 def _kernels():
     import triton.language as tl
     import triton_dist.language as dl
+
     from moonep_td._triton_runtime import triton_dist
 
     td = triton_dist()
 
     @td.jit
     def dispatch_kernel(
-        hidden_sh_ptr, hidden_buf_ptr, weights_meta_ptr, route_w_ptr, dst_ptr,
-        stride_sh_h, stride_buf_row, K, H, N, NvS, NvS_padded,
-        meta_stride, weights_off, WITH_WEIGHTS: tl.constexpr, BLOCK_H: tl.constexpr,
+        hidden_sh_ptr,
+        hidden_buf_ptr,
+        weights_meta_ptr,
+        route_w_ptr,
+        dst_ptr,
+        stride_sh_h,
+        stride_buf_row,
+        K,
+        H,
+        N,
+        NvS,
+        NvS_padded,
+        meta_stride,
+        weights_off,
+        WITH_WEIGHTS: tl.constexpr,
+        BLOCK_H: tl.constexpr,
     ):
         slot = tl.program_id(0)
         if slot >= N:
@@ -56,7 +70,8 @@ def _kernels():
         if dst_val >= 0:
             remote_buf = dl.symm_at(hidden_buf_ptr, dest_rank)
             row_idx = (dest_rank * NvS_padded + loff).to(tl.int64)
-            dst_row = remote_buf + row_idx * stride_buf_row
+            stride_buf_row64 = stride_buf_row.to(tl.int64)
+            dst_row = remote_buf + row_idx * stride_buf_row64
             for h_off in range(0, H, BLOCK_H):
                 cols = h_off + tl.arange(0, BLOCK_H)
                 mask = cols < H
@@ -69,9 +84,18 @@ def _kernels():
 
     @td.jit
     def zero_fill_kernel(
-        hidden_buf_ptr, weights_meta_ptr, zero_fill_ptr, stride_buf_row,
-        rank, NvS_padded, H, num_groups, meta_stride, weights_off,
-        WITH_WEIGHTS: tl.constexpr, BLOCK_H: tl.constexpr,
+        hidden_buf_ptr,
+        weights_meta_ptr,
+        zero_fill_ptr,
+        stride_buf_row,
+        rank,
+        NvS_padded,
+        H,
+        num_groups,
+        meta_stride,
+        weights_off,
+        WITH_WEIGHTS: tl.constexpr,
+        BLOCK_H: tl.constexpr,
     ):
         g = tl.program_id(0)
         if g >= num_groups:
@@ -80,9 +104,10 @@ def _kernels():
         n_pad = tl.load(zero_fill_ptr + g * 2 + 1)
         if n_pad <= 0:
             return
-        row_base = (rank * NvS_padded + pad_start).to(tl.int64) * stride_buf_row
+        stride_buf_row64 = stride_buf_row.to(tl.int64)
+        row_base = (rank * NvS_padded + pad_start).to(tl.int64) * stride_buf_row64
         for row in range(n_pad):
-            dst_row = hidden_buf_ptr + row_base + row.to(tl.int64) * stride_buf_row
+            dst_row = hidden_buf_ptr + row_base + row.to(tl.int64) * stride_buf_row64
             for h_off in range(0, H, BLOCK_H):
                 cols = h_off + tl.arange(0, BLOCK_H)
                 mask = cols < H
@@ -111,8 +136,9 @@ def launch_dispatch(
     assert hidden_sh.dtype == torch.bfloat16 and hidden_sh.is_contiguous(), "hidden_sh must be contiguous bf16"
     assert tuple(hidden_sh.shape) == (int(ctx["S"]), int(ctx["H"])), "hidden_sh shape mismatch"
     if route_weights_sk is not None:
-        assert route_weights_sk.dtype == torch.float32 and route_weights_sk.is_contiguous(), \
+        assert route_weights_sk.dtype == torch.float32 and route_weights_sk.is_contiguous(), (
             "route_weights_sk must be contiguous fp32"
+        )
         assert tuple(route_weights_sk.shape) == (int(ctx["S"]), int(ctx["K"])), "route_weights_sk shape mismatch"
     assert plan.dst.dtype == torch.int32, "dst must be int32"
     _check_dispatch_plan(ctx, hidden_sh, plan)
@@ -128,17 +154,39 @@ def launch_dispatch(
     BLOCK_H = cached_block_h(H)
     nw = _pipeline_num_warps(4)
     dispatch_kernel[(N,)](
-        hidden_sh, ctx["hidden_buf"], w_meta, route_weights_sk, plan.dst,
-        hidden_sh.stride(0), ctx["hidden_buf"].stride(0),
-        K, H, N, NvS, NvS_padded,
-        meta_stride, weights_off, WITH_WEIGHTS=with_weights, BLOCK_H=BLOCK_H, num_warps=nw,
+        hidden_sh,
+        ctx["hidden_buf"],
+        w_meta,
+        route_weights_sk,
+        plan.dst,
+        hidden_sh.stride(0),
+        ctx["hidden_buf"].stride(0),
+        K,
+        H,
+        N,
+        NvS,
+        NvS_padded,
+        meta_stride,
+        weights_off,
+        WITH_WEIGHTS=with_weights,
+        BLOCK_H=BLOCK_H,
+        num_warps=nw,
     )
     num_groups = int(plan.zero_fill_ranges.shape[0])
     zero_fill_kernel[(num_groups,)](
-        ctx["hidden_buf"], w_meta, plan.zero_fill_ranges,
-        ctx["hidden_buf"].stride(0), int(ctx["rank"]), NvS_padded, H, num_groups,
-        meta_stride, weights_off,
-        WITH_WEIGHTS=with_weights, BLOCK_H=BLOCK_H, num_warps=1,
+        ctx["hidden_buf"],
+        w_meta,
+        plan.zero_fill_ranges,
+        ctx["hidden_buf"].stride(0),
+        int(ctx["rank"]),
+        NvS_padded,
+        H,
+        num_groups,
+        meta_stride,
+        weights_off,
+        WITH_WEIGHTS=with_weights,
+        BLOCK_H=BLOCK_H,
+        num_warps=1,
     )
     if build_dedup_map:
         launch_dedup_builder(ctx, plan)

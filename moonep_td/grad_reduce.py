@@ -26,11 +26,7 @@ def _build_grad_reduce_work(
     experts_flat = experts_to_copy.reshape(-1)
     rb = torch.arange(R * B, device=dev, dtype=torch.int64)
 
-    valid = (
-        (experts_flat >= 0)
-        & (experts_flat >= owner_start)
-        & (experts_flat < owner_end)
-    )
+    valid = (experts_flat >= 0) & (experts_flat >= owner_start) & (experts_flat < owner_end)
     if not bool(valid.any().item()):
         empty_i32 = torch.empty(0, dtype=torch.int32, device=dev)
         offsets = torch.zeros(epn + 1, dtype=torch.int32, device=dev)
@@ -66,6 +62,7 @@ def _build_grad_reduce_work(
 def _kernels():
     import triton.language as tl
     import triton_dist.language as dl
+
     from moonep_td._triton_runtime import triton_dist
 
     td = triton_dist()
@@ -211,9 +208,7 @@ def launch_grad_reduce(
     assert buf_H == H and buf_Hp == Hp
     assert E % R == 0
     assert 0 <= int(rank) < R
-    assert H % _TILE == 0 and Hp % _TILE == 0, (
-        f"H and H' must be multiples of {_TILE}, got ({H}, {Hp})"
-    )
+    assert H % _TILE == 0 and Hp % _TILE == 0, f"H and H' must be multiples of {_TILE}, got ({H}, {Hp})"
     assert isinstance(num_sms, int) and num_sms > 0
 
     ctx = {
@@ -228,7 +223,9 @@ def launch_grad_reduce(
     launch_cross_rank_barrier(ctx)
 
     active, offsets, slot_rb, clear_b, _counts, num_active, num_clear = _build_grad_reduce_work(
-        experts_to_copy, rank, E,
+        experts_to_copy,
+        rank,
+        E,
     )
 
     if num_active > 0:

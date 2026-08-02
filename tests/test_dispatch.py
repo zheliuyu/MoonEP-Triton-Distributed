@@ -6,8 +6,6 @@ Run with:
 
 from dataclasses import replace
 
-import os
-
 import pytest
 import torch
 
@@ -24,7 +22,6 @@ from tests.kernel_test_utils import (
     make_topk,
 )
 from tests.planning_reference import launch_planning_torch_reference
-
 
 DISPATCH_CASES = [
     KernelCase("balanced", S=256, K=8, epn=16, H=128, num_sms=32, B=4),
@@ -137,16 +134,6 @@ LARGE_DISPATCH_CASES = [
 ]
 
 
-_SKIP_SLOW_DISPATCH = pytest.mark.skipif(
-    os.environ.get("RUN_SLOW_GPU_TESTS", "0") != "1",
-    reason=(
-        "Skipped by default: launch_planning_torch_reference + dedup semantic check "
-        "on large_hidden (S=8192, H=7168, K=16) takes far too long in full suite. "
-        "Set RUN_SLOW_GPU_TESTS=1 to run."
-    ),
-)
-
-
 def _traceable_hidden(rank, S, H):
     hidden = torch.zeros(S, H, dtype=torch.bfloat16, device=f"cuda:{rank}")
     hidden_i16 = hidden.view(torch.int16)
@@ -158,11 +145,7 @@ def _traceable_hidden(rank, S, H):
 
 
 def _traceable_weights(rank, S, K):
-    weights_i32 = (
-        torch.arange(S * K, dtype=torch.int32, device=f"cuda:{rank}")
-        .reshape(S, K)
-        .add_(rank * S * K)
-    )
+    weights_i32 = torch.arange(S * K, dtype=torch.int32, device=f"cuda:{rank}").reshape(S, K).add_(rank * S * K)
     return weights_i32.view(torch.float32)
 
 
@@ -184,13 +167,9 @@ def _plan_and_dispatch(
     topk, tpe = make_topk(case, rank, R)
     plan, _cu = allocate_planning_outputs(ctx)
     launch_planning(ctx, topk.reshape(-1).contiguous(), tpe, _cu, plan)
-    _ref_dst, _ref_cu, _ref_etc, _ref_stats, _ref_zfr, ref_dedup_plan = (
-        launch_planning_torch_reference(ctx, topk, tpe)
-    )
+    _ref_dst, _ref_cu, _ref_etc, _ref_stats, _ref_zfr, ref_dedup_plan = launch_planning_torch_reference(ctx, topk, tpe)
     launch_dispatch(ctx, hidden, weights, plan, build_dedup_map=True)
-    assert_dedup_plan_semantic_equal_all_ranks(
-        "dispatch dedup plan", plan, ref_dedup_plan, rank, R
-    )
+    assert_dedup_plan_semantic_equal_all_ranks("dispatch dedup plan", plan, ref_dedup_plan, rank, R)
     dedup_errors = dedup_plan_invariant_errors(case, ctx, plan)
     assert_all_ranks(
         not dedup_errors,
@@ -218,9 +197,9 @@ def _plan_and_dispatch(
     return plan.dst, plan, hidden_user, weights_user
 
 
-def _verify_dispatch_by_dst(ctx, case, rank, R, dst, hidden_user,
-                            check_weights=True, weights_user=None,
-                            max_checks=None, copy_to_cpu=True):
+def _verify_dispatch_by_dst(
+    ctx, case, rank, R, dst, hidden_user, check_weights=True, weights_user=None, max_checks=None, copy_to_cpu=True
+):
     nvs_stride = int(ctx["NvS"])
     all_dst = gather_tensor(dst.reshape(case.S, case.K).contiguous(), R).cpu()
 
@@ -262,8 +241,7 @@ def _verify_dispatch_by_dst(ctx, case, rank, R, dst, hidden_user,
                     actual_w = int(weights_i32[local_off].item())
                     if actual_w != expected_w:
                         errors.append(
-                            f"weight src=({src_r},{s},{k}) loff={local_off}: "
-                            f"expected {expected_w}, got {actual_w}"
+                            f"weight src=({src_r},{s},{k}) loff={local_off}: expected {expected_w}, got {actual_w}"
                         )
 
                 checked += 1
@@ -293,9 +271,7 @@ def _zero_row_errors(zero_fill_ranges, hidden_user, weights_user=None):
                 errors.append(f"hidden padding loff={local_off} is nonzero")
             if weights_cpu is not None and float(weights_cpu[local_off].item()) != 0.0:
                 value = int(weights_cpu.view(torch.int32)[local_off].item()) & 0xFFFFFFFF
-                errors.append(
-                    f"weight padding loff={local_off} is 0x{value:08x}"
-                )
+                errors.append(f"weight padding loff={local_off} is 0x{value:08x}")
     return errors, rows
 
 
@@ -306,9 +282,7 @@ def test_dispatch_scatters_hidden_and_weights_by_dst(dist_env, case):
     hidden = _traceable_hidden(rank, case.S, case.H)
     weights = _traceable_weights(rank, case.S, case.K)
 
-    dst, _plan, hidden_user, weights_user = _plan_and_dispatch(
-        ctx, case, rank, R, hidden, weights
-    )
+    dst, _plan, hidden_user, weights_user = _plan_and_dispatch(ctx, case, rank, R, hidden, weights)
     torch.cuda.synchronize()
 
     errors, checked = _verify_dispatch_by_dst(
@@ -438,21 +412,17 @@ def test_dispatch_saved_plan_hidden_only_reuses_dst_and_skips_weights(dist_env):
 
 
 @pytest.mark.parametrize("case", case_params(LARGE_DISPATCH_CASES))
-@_SKIP_SLOW_DISPATCH
 def test_dispatch_large_hidden_stride_spotcheck(dist_env, case):
     rank, R = dist_env
     ctx = init_case(case, R)
     hidden = _traceable_hidden(rank, case.S, case.H)
     weights = _traceable_weights(rank, case.S, case.K)
 
-    dst, _plan, hidden_user, weights_user = _plan_and_dispatch(
-        ctx, case, rank, R, hidden, weights
-    )
+    dst, _plan, hidden_user, weights_user = _plan_and_dispatch(ctx, case, rank, R, hidden, weights)
     torch.cuda.synchronize()
 
     errors, checked = _verify_dispatch_by_dst(
-        ctx, case, rank, R, dst, hidden_user=hidden_user,
-        weights_user=weights_user, max_checks=256, copy_to_cpu=False
+        ctx, case, rank, R, dst, hidden_user=hidden_user, weights_user=weights_user, max_checks=256, copy_to_cpu=False
     )
     assert_all_ranks(
         checked > 0 and not errors,

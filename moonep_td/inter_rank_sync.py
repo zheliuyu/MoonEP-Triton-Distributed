@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import torch
-
 from moonep_td._common import launch_cross_rank_barrier
 
 

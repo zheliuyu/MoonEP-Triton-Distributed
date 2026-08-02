@@ -22,7 +22,7 @@ from moonep_td.buffer import (
 )
 from moonep_td.combine import launch_combine
 from moonep_td.combine_prologue import launch_combine_prologue
-from moonep_td.constants import BARRIER_SLOTS, DEDUP_BUILDER_WARPS
+from moonep_td.constants import BARRIER_SLOTS
 from moonep_td.dispatch import launch_dispatch
 from moonep_td.dispatch_epilogue import launch_dispatch_epilogue
 from moonep_td.grad_reduce import launch_grad_reduce
@@ -96,22 +96,41 @@ def _create_context(
     meta_buf = create_nvl_dist_tensor([R * meta_chunk_padded], torch.int32, rank, R, group=group)
     # NVSHMEM heap blocks are reused without zeroing; clear local shards so
     # padding slots and weight scratch do not inherit stale/NaN patterns.
-    hidden_buf[rank * NvS_padded:(rank + 1) * NvS_padded].zero_()
-    meta_buf[rank * meta_chunk_padded:(rank + 1) * meta_chunk_padded].zero_()
+    hidden_buf[rank * NvS_padded : (rank + 1) * NvS_padded].zero_()
+    meta_buf[rank * meta_chunk_padded : (rank + 1) * meta_chunk_padded].zero_()
     for r in range(R):
-        meta_buf[r * meta_chunk_padded + BARRIER_OFF: r * meta_chunk_padded + BARRIER_OFF + BARRIER_SLOTS].zero_()
+        meta_buf[r * meta_chunk_padded + BARRIER_OFF : r * meta_chunk_padded + BARRIER_OFF + BARRIER_SLOTS].zero_()
     dist.barrier(group=group)
 
     ctx = {
-        "rank": rank, "group": group, "R": R, "E": E, "S": S, "K": K, "H": H, "B": B,
-        "N": N, "NvS": NvS, "NvS_capacity": NvS_capacity, "NvS_padded": NvS_padded,
-        "num_sms": num_sms, "num_sms_dedup": num_sms, "token_padding": token_padding,
-        "device": device, "token_padding_extra": token_padding_extra,
-        "hidden_buf": hidden_buf, "meta_buf": meta_buf,
+        "rank": rank,
+        "group": group,
+        "R": R,
+        "E": E,
+        "S": S,
+        "K": K,
+        "H": H,
+        "B": B,
+        "N": N,
+        "NvS": NvS,
+        "NvS_capacity": NvS_capacity,
+        "NvS_padded": NvS_padded,
+        "num_sms": num_sms,
+        "num_sms_dedup": num_sms,
+        "token_padding": token_padding,
+        "device": device,
+        "token_padding_extra": token_padding_extra,
+        "hidden_buf": hidden_buf,
+        "meta_buf": meta_buf,
         "meta_chunk_padded": meta_chunk_padded,
-        "WEIGHTS_OFF": WEIGHTS_OFF, "TPE_OFF": TPE_OFF, "PLAN_OFF": PLAN_OFF,
-        "TOPK0_OFF": TOPK0_OFF, "ORDER_OFF": ORDER_OFF, "ORDER0_OFF": ORDER0_OFF,
-        "BARRIER_OFF": BARRIER_OFF, "SRC_INFO_OFF": SRC_INFO_OFF,
+        "WEIGHTS_OFF": WEIGHTS_OFF,
+        "TPE_OFF": TPE_OFF,
+        "PLAN_OFF": PLAN_OFF,
+        "TOPK0_OFF": TOPK0_OFF,
+        "ORDER_OFF": ORDER_OFF,
+        "ORDER0_OFF": ORDER0_OFF,
+        "BARRIER_OFF": BARRIER_OFF,
+        "SRC_INFO_OFF": SRC_INFO_OFF,
         "num_vblocks": num_vblocks,
         "alloc": torch.empty(E * R, dtype=torch.int32, device=dev),
         "group_tokens": torch.empty(R, dtype=torch.int32, device=dev),
@@ -123,9 +142,10 @@ def _create_context(
         "kidx_to_loff": torch.empty(R * S * K, dtype=torch.int32, device=dev),
         "builder_bar": torch.zeros(1, dtype=torch.int32, device=dev),
     }
-    ctx["hidden_buf_local"] = hidden_buf[rank * NvS_padded: rank * NvS_padded + NvS]
-    ctx["weights_buf_local"] = meta_buf[rank * meta_chunk_padded + WEIGHTS_OFF:
-                                         rank * meta_chunk_padded + WEIGHTS_OFF + NvS]
+    ctx["hidden_buf_local"] = hidden_buf[rank * NvS_padded : rank * NvS_padded + NvS]
+    ctx["weights_buf_local"] = meta_buf[
+        rank * meta_chunk_padded + WEIGHTS_OFF : rank * meta_chunk_padded + WEIGHTS_OFF + NvS
+    ]
     return ctx
 
 
@@ -135,8 +155,16 @@ def _launch_full_weight_prefetches(ctx, full_gate_weight, full_up_weight, full_d
         launch_prefetch(w[:E], w[E:], experts_to_copy[rank], num_sms=num_sms)
 
 
-def _launch_full_grad_reduces(ctx, experts_to_copy, full_gate_grad, full_up_grad, full_down_grad,
-                              gate_reduce_buffer, up_reduce_buffer, down_reduce_buffer):
+def _launch_full_grad_reduces(
+    ctx,
+    experts_to_copy,
+    full_gate_grad,
+    full_up_grad,
+    full_down_grad,
+    gate_reduce_buffer,
+    up_reduce_buffer,
+    down_reduce_buffer,
+):
     E, rank, num_sms = int(ctx["E"]), int(ctx["rank"]), int(ctx["num_sms"])
     for full_grad, reduce_buffer in (
         (full_gate_grad, gate_reduce_buffer),
@@ -144,9 +172,15 @@ def _launch_full_grad_reduces(ctx, experts_to_copy, full_gate_grad, full_up_grad
         (full_down_grad, down_reduce_buffer),
     ):
         launch_grad_reduce(
-            full_grad[:E], reduce_buffer, experts_to_copy, rank=rank, num_sms=num_sms,
-            meta_buf=ctx["meta_buf"], meta_stride=int(ctx["meta_chunk_padded"]),
-            barrier_off=int(ctx["BARRIER_OFF"]), grid_sync_bar=ctx["grid_sync_bar"],
+            full_grad[:E],
+            reduce_buffer,
+            experts_to_copy,
+            rank=rank,
+            num_sms=num_sms,
+            meta_buf=ctx["meta_buf"],
+            meta_stride=int(ctx["meta_chunk_padded"]),
+            barrier_off=int(ctx["BARRIER_OFF"]),
+            grid_sync_bar=ctx["grid_sync_bar"],
         )
 
 
@@ -173,8 +207,9 @@ class Buffer:
         self.enable_pdl = enable_pdl
         self._comm_stream: torch.cuda.Stream | None = None
         self._destroyed = False
-        self._ctx = _create_context(S, H, K, E, num_ep_ranks, num_sms=num_sms,
-                                    token_padding=token_padding, B=B, group=group)
+        self._ctx = _create_context(
+            S, H, K, E, num_ep_ranks, num_sms=num_sms, token_padding=token_padding, B=B, group=group
+        )
         max_sms = torch.cuda.get_device_properties(int(self._ctx["device"])).multi_processor_count
         self._ctx["num_sms_dedup"] = _num_sms_dedup_from_env(max_sms)
         self._comm_stream = torch.cuda.Stream(device=int(self._ctx["device"]), priority=comm_stream_priority)
@@ -227,25 +262,60 @@ class Buffer:
 
     @staticmethod
     def _plan_runtime_tensors(plan: MoonEPCommPlan):
-        return (plan.dst, plan.experts_to_copy, plan.zero_fill_ranges, plan.remote_stats,
-                plan.dup_groups, plan.dup_loffs, plan.dup_counts)
+        return (
+            plan.dst,
+            plan.experts_to_copy,
+            plan.zero_fill_ranges,
+            plan.remote_stats,
+            plan.dup_groups,
+            plan.dup_loffs,
+            plan.dup_counts,
+        )
 
-    def _run_dispatch_on_current_stream(self, ctx, hidden_sh, route_weights_sk, planning_args, plan,
-                                        hidden_nvsh, route_weights_nvs, *, inter_rank_sync, zero_copy):
+    def _run_dispatch_on_current_stream(
+        self,
+        ctx,
+        hidden_sh,
+        route_weights_sk,
+        planning_args,
+        plan,
+        hidden_nvsh,
+        route_weights_nvs,
+        *,
+        inter_rank_sync,
+        zero_copy,
+    ):
         if inter_rank_sync:
             launch_inter_rank_sync(ctx)
         if planning_args is not None:
             topk_flat, tokens_per_expert, cu_seqlens = planning_args
             launch_planning(ctx, topk_flat, tokens_per_expert, cu_seqlens, plan)
-        launch_dispatch(ctx, hidden_sh, route_weights_sk, plan, build_dedup_map=planning_args is not None, pdl_trigger=self.enable_pdl)
+        launch_dispatch(
+            ctx,
+            hidden_sh,
+            route_weights_sk,
+            plan,
+            build_dedup_map=planning_args is not None,
+            pdl_trigger=self.enable_pdl,
+        )
         launch_dispatch_epilogue(ctx, plan, pdl_launch=self.enable_pdl)
         if not zero_copy:
             hidden_nvsh.copy_(ctx["hidden_buf_local"])
             if route_weights_nvs is not None:
                 route_weights_nvs.copy_(ctx["weights_buf_local"].view(torch.float32))
 
-    def _run_combine_on_current_stream(self, ctx, hidden_sh, plan, hidden_nvsh, route_weights_nvs,
-                                       route_weights_sk, *, inter_rank_sync, zero_copy):
+    def _run_combine_on_current_stream(
+        self,
+        ctx,
+        hidden_sh,
+        plan,
+        hidden_nvsh,
+        route_weights_nvs,
+        route_weights_sk,
+        *,
+        inter_rank_sync,
+        zero_copy,
+    ):
         if inter_rank_sync:
             launch_inter_rank_sync(ctx)
         if not zero_copy:
@@ -255,8 +325,18 @@ class Buffer:
         launch_combine_prologue(ctx, plan, pdl_trigger=self.enable_pdl)
         launch_combine(ctx, hidden_sh, plan.dst, output_sk=route_weights_sk, pdl_launch=self.enable_pdl)
 
-    def dispatch(self, hidden_sh, route_weights_sk=None, topk_experts_sk=None, tokens_per_expert=None,
-                 plan=None, async_finish=False, *, inter_rank_sync=True, zero_copy=False):
+    def dispatch(
+        self,
+        hidden_sh,
+        route_weights_sk=None,
+        topk_experts_sk=None,
+        tokens_per_expert=None,
+        plan=None,
+        async_finish=False,
+        *,
+        inter_rank_sync=True,
+        zero_copy=False,
+    ):
         ctx = self._require_ctx()
         if plan is None:
             assert topk_experts_sk is not None and tokens_per_expert is not None
@@ -269,10 +349,23 @@ class Buffer:
             route_weights_nvs = ctx["weights_buf_local"].view(torch.float32) if route_weights_sk is not None else None
         else:
             hidden_nvsh = torch.empty_like(ctx["hidden_buf_local"])
-            route_weights_nvs = torch.empty(ctx["NvS"], dtype=torch.float32, device=ctx["meta_buf"].device) if route_weights_sk is not None else None
+            route_weights_nvs = (
+                torch.empty(ctx["NvS"], dtype=torch.float32, device=ctx["meta_buf"].device)
+                if route_weights_sk is not None
+                else None
+            )
         if not async_finish:
-            self._run_dispatch_on_current_stream(ctx, hidden_sh, route_weights_sk, planning_args, plan,
-                                                 hidden_nvsh, route_weights_nvs, inter_rank_sync=inter_rank_sync, zero_copy=zero_copy)
+            self._run_dispatch_on_current_stream(
+                ctx,
+                hidden_sh,
+                route_weights_sk,
+                planning_args,
+                plan,
+                hidden_nvsh,
+                route_weights_nvs,
+                inter_rank_sync=inter_rank_sync,
+                zero_copy=zero_copy,
+            )
             return hidden_nvsh, route_weights_nvs, cu_seqlens, plan
         comm = self._comm_stream
         tensors = [hidden_sh, route_weights_sk, hidden_nvsh, route_weights_nvs, *self._plan_runtime_tensors(plan)]
@@ -281,12 +374,23 @@ class Buffer:
         self._record_streams(tensors, comm)
         comm.wait_event(torch.cuda.current_stream().record_event())
         with torch.cuda.stream(comm):
-            self._run_dispatch_on_current_stream(ctx, hidden_sh, route_weights_sk, planning_args, plan,
-                                                 hidden_nvsh, route_weights_nvs, inter_rank_sync=inter_rank_sync, zero_copy=zero_copy)
+            self._run_dispatch_on_current_stream(
+                ctx,
+                hidden_sh,
+                route_weights_sk,
+                planning_args,
+                plan,
+                hidden_nvsh,
+                route_weights_nvs,
+                inter_rank_sync=inter_rank_sync,
+                zero_copy=zero_copy,
+            )
             done = comm.record_event()
         return hidden_nvsh, route_weights_nvs, cu_seqlens, plan, done
 
-    def prefetch_weight(self, plan=None, async_finish=False, *, full_gate_weight=None, full_up_weight=None, full_down_weight=None):
+    def prefetch_weight(
+        self, plan=None, async_finish=False, *, full_gate_weight=None, full_up_weight=None, full_down_weight=None
+    ):
         ctx = self._require_ctx()
         assert isinstance(plan, MoonEPCommPlan)
         args = (full_gate_weight, full_up_weight, full_down_weight)
@@ -301,8 +405,16 @@ class Buffer:
             _launch_full_weight_prefetches(ctx, *args, plan.experts_to_copy)
             return comm.record_event()
 
-    def combine(self, plan=None, hidden_nvsh=None, route_weights_nvs=None, async_finish=False,
-                inter_rank_sync=True, *, zero_copy=False):
+    def combine(
+        self,
+        plan=None,
+        hidden_nvsh=None,
+        route_weights_nvs=None,
+        async_finish=False,
+        inter_rank_sync=True,
+        *,
+        zero_copy=False,
+    ):
         ctx = self._require_ctx()
 
         assert isinstance(plan, MoonEPCommPlan), "Buffer.combine: plan is required"
@@ -325,21 +437,52 @@ class Buffer:
                     "the NVL weights view returned by dispatch(zero_copy=True)"
                 )
         hidden_sh = torch.empty(int(ctx["S"]), int(ctx["H"]), dtype=hidden_nvsh.dtype, device=hidden_nvsh.device)
-        route_weights_sk = torch.empty(int(ctx["S"]), int(ctx["K"]), dtype=torch.float32, device=hidden_nvsh.device) if route_weights_nvs is not None else None
+        route_weights_sk = (
+            torch.empty(int(ctx["S"]), int(ctx["K"]), dtype=torch.float32, device=hidden_nvsh.device)
+            if route_weights_nvs is not None
+            else None
+        )
         if not async_finish:
-            self._run_combine_on_current_stream(ctx, hidden_sh, plan, hidden_nvsh, route_weights_nvs, route_weights_sk,
-                                                inter_rank_sync=inter_rank_sync, zero_copy=zero_copy)
+            self._run_combine_on_current_stream(
+                ctx,
+                hidden_sh,
+                plan,
+                hidden_nvsh,
+                route_weights_nvs,
+                route_weights_sk,
+                inter_rank_sync=inter_rank_sync,
+                zero_copy=zero_copy,
+            )
             return hidden_sh, route_weights_sk, None
         comm = self._comm_stream
-        self._record_streams((hidden_sh, *self._plan_runtime_tensors(plan), hidden_nvsh, route_weights_nvs, route_weights_sk), comm)
+        self._record_streams(
+            (hidden_sh, *self._plan_runtime_tensors(plan), hidden_nvsh, route_weights_nvs, route_weights_sk), comm
+        )
         comm.wait_event(torch.cuda.current_stream().record_event())
         with torch.cuda.stream(comm):
-            self._run_combine_on_current_stream(ctx, hidden_sh, plan, hidden_nvsh, route_weights_nvs, route_weights_sk,
-                                                inter_rank_sync=inter_rank_sync, zero_copy=zero_copy)
+            self._run_combine_on_current_stream(
+                ctx,
+                hidden_sh,
+                plan,
+                hidden_nvsh,
+                route_weights_nvs,
+                route_weights_sk,
+                inter_rank_sync=inter_rank_sync,
+                zero_copy=zero_copy,
+            )
             return hidden_sh, route_weights_sk, comm.record_event()
 
-    def reduce_grad(self, plan=None, async_finish=False, full_gate_grad=None, full_up_grad=None, full_down_grad=None,
-                    gate_reduce_buffer=None, up_reduce_buffer=None, down_reduce_buffer=None):
+    def reduce_grad(
+        self,
+        plan=None,
+        async_finish=False,
+        full_gate_grad=None,
+        full_up_grad=None,
+        full_down_grad=None,
+        gate_reduce_buffer=None,
+        up_reduce_buffer=None,
+        down_reduce_buffer=None,
+    ):
         ctx = self._require_ctx()
         assert isinstance(plan, MoonEPCommPlan)
         args = (full_gate_grad, full_up_grad, full_down_grad, gate_reduce_buffer, up_reduce_buffer, down_reduce_buffer)

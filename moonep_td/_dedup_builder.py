@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import functools
 
-import torch
-
 from moonep_td.constants import KIDX_BITS
 from moonep_td.planning import MoonEPCommPlan
 
@@ -17,6 +15,7 @@ _NVS_MASK = (1 << _NVS_BITS) - 1
 @functools.lru_cache(maxsize=None)
 def _kernels():
     import triton.language as tl
+
     from moonep_td._triton_runtime import triton_dist
 
     td = triton_dist()

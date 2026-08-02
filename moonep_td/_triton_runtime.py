@@ -8,4 +8,5 @@ import functools
 @functools.lru_cache(maxsize=1)
 def triton_dist():
     import triton_dist as td
+
     return td

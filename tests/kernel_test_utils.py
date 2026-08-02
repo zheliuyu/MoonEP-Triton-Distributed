@@ -6,7 +6,6 @@ import torch.distributed as dist
 
 from tests.generate_topk_routing import generate_topk_routing
 
-
 DEFAULT_TOKEN_PADDING = 128
 
 _ACTIVE_BUFFERS = []
@@ -84,9 +83,7 @@ def make_topk(case, rank, R):
 
     if case.routing in {"balanced", "biased"}:
         bias = case.bias_ratio if case.routing == "biased" else 0.0
-        return generate_topk_routing(
-            case.S, case.K, E, R, bias, dev, case.seed, rank=rank
-        )
+        return generate_topk_routing(case.S, case.K, E, R, bias, dev, case.seed, rank=rank)
 
     s = torch.arange(case.S, device=dev)[:, None]
     k = torch.arange(case.K, device=dev)[None, :]
@@ -137,10 +134,7 @@ def assert_tensor_equal_all_ranks(name, actual, expected, rank, R, max_print=5):
         lines = [f"{n_diff}/{actual_cpu.numel()} elements differ"]
         for pos in diff_pos:
             idx = tuple(int(v.item()) for v in pos)
-            lines.append(
-                f"{name}{idx}: actual={actual_cpu[idx].item()} "
-                f"expected={expected_cpu[idx].item()}"
-            )
+            lines.append(f"{name}{idx}: actual={actual_cpu[idx].item()} expected={expected_cpu[idx].item()}")
         detail = "; ".join(lines)
     assert_all_ranks(ok, rank, R, name, detail)
 
@@ -157,8 +151,7 @@ def clone_dedup_plan_fields(plan):
 
 
 def dedup_plan_fields_equal(plan, snapshot):
-    return all(torch.equal(getattr(plan, field), snapshot[field])
-               for field in DEDUP_PLAN_FIELDS)
+    return all(torch.equal(getattr(plan, field), snapshot[field]) for field in DEDUP_PLAN_FIELDS)
 
 
 def _dedup_group_map(plan, *, max_print=5):
@@ -184,9 +177,7 @@ def _dedup_group_map(plan, *, max_print=5):
 
     seen_dups = []
     for group_idx in range(group_count):
-        primary, dup_start, dup_count = (
-            int(v) for v in groups[group_idx].tolist()
-        )
+        primary, dup_start, dup_count = (int(v) for v in groups[group_idx].tolist())
         if not (0 <= primary < NvS):
             errors.append(f"dup group {group_idx} primary {primary} out of range")
             continue
@@ -195,17 +186,14 @@ def _dedup_group_map(plan, *, max_print=5):
             continue
         if dup_count <= 0 or dup_start + dup_count > dup_count_total:
             errors.append(
-                f"dup group {group_idx} invalid dup range "
-                f"start={dup_start} count={dup_count} total={dup_count_total}"
+                f"dup group {group_idx} invalid dup range start={dup_start} count={dup_count} total={dup_count_total}"
             )
             continue
         dups = []
-        for offset_t in dup_loffs[dup_start:dup_start + dup_count].tolist():
+        for offset_t in dup_loffs[dup_start : dup_start + dup_count].tolist():
             offset = int(offset_t)
             if not (0 <= offset < NvS):
-                errors.append(
-                    f"dup group {group_idx} contains out-of-range dup loff {offset}"
-                )
+                errors.append(f"dup group {group_idx} contains out-of-range dup loff {offset}")
                 continue
             dups.append(offset)
             seen_dups.append(offset)
@@ -219,14 +207,10 @@ def _dedup_group_map(plan, *, max_print=5):
     if len(seen_dups) != len(seen_dup_set):
         errors.append("dup_loffs contains repeated duplicate rows")
     if len(seen_dups) != dup_count_total:
-        errors.append(
-            f"dup loff count mismatch: header={dup_count_total}, used={len(seen_dups)}"
-        )
+        errors.append(f"dup loff count mismatch: header={dup_count_total}, used={len(seen_dups)}")
     overlap = seen_dup_set & set(mapping.keys())
     if overlap:
-        errors.append(
-            f"rows appear both as primary and duplicate: {sorted(overlap)[:max_print]}"
-        )
+        errors.append(f"rows appear both as primary and duplicate: {sorted(overlap)[:max_print]}")
 
     return mapping, errors
 
@@ -237,14 +221,9 @@ def dedup_plan_semantic_errors(name, actual, expected, max_print=5):
         actual_t = getattr(actual, field)
         expected_t = getattr(expected, field)
         if actual_t.dtype != expected_t.dtype:
-            errors.append(
-                f"{field} dtype actual={actual_t.dtype} expected={expected_t.dtype}"
-            )
+            errors.append(f"{field} dtype actual={actual_t.dtype} expected={expected_t.dtype}")
         if tuple(actual_t.shape) != tuple(expected_t.shape):
-            errors.append(
-                f"{field} shape actual={tuple(actual_t.shape)} "
-                f"expected={tuple(expected_t.shape)}"
-            )
+            errors.append(f"{field} shape actual={tuple(actual_t.shape)} expected={tuple(expected_t.shape)}")
         if errors:
             return errors
 
@@ -257,9 +236,7 @@ def dedup_plan_semantic_errors(name, actual, expected, max_print=5):
             errors.append(f"{name} {label} actual={a} expected={e}")
 
     actual_map, group_errors = _dedup_group_map(actual, max_print=max_print)
-    expected_map, expected_group_errors = _dedup_group_map(
-        expected, max_print=max_print
-    )
+    expected_map, expected_group_errors = _dedup_group_map(expected, max_print=max_print)
     errors.extend(f"{name} actual {err}" for err in group_errors[:max_print])
     errors.extend(f"{name} expected {err}" for err in expected_group_errors[:max_print])
     if actual_map != expected_map:
@@ -267,21 +244,15 @@ def dedup_plan_semantic_errors(name, actual, expected, max_print=5):
         expected_keys = set(expected_map)
         missing = sorted(expected_keys - actual_keys)[:max_print]
         extra = sorted(actual_keys - expected_keys)[:max_print]
-        mismatched = [
-            key for key in sorted(actual_keys & expected_keys)
-            if actual_map[key] != expected_map[key]
-        ][:max_print]
-        errors.append(
-            f"{name} duplicate group map differs: "
-            f"missing={missing} extra={extra} mismatched={mismatched}"
-        )
+        mismatched = [key for key in sorted(actual_keys & expected_keys) if actual_map[key] != expected_map[key]][
+            :max_print
+        ]
+        errors.append(f"{name} duplicate group map differs: missing={missing} extra={extra} mismatched={mismatched}")
 
     return errors
 
 
-def assert_dedup_plan_semantic_equal_all_ranks(
-    name, actual, expected, rank, R, max_print=5
-):
+def assert_dedup_plan_semantic_equal_all_ranks(name, actual, expected, rank, R, max_print=5):
     errors = dedup_plan_semantic_errors(name, actual, expected, max_print=max_print)
     assert_all_ranks(
         not errors,
@@ -326,13 +297,7 @@ def planning_invariant_errors(case, ctx, dst, cu_seqlens, experts_to_copy):
     NvS = int(ctx["NvS"])
     N = case.S * case.K
 
-    planning_out_elems = (
-        3 * E * R
-        + R * (E + B)
-        + 2 * R * (E + B)
-        + R * B
-        + 2 * R
-    )
+    planning_out_elems = 3 * E * R + R * (E + B) + 2 * R * (E + B) + R * B + 2 * R
     n4 = _align_up(N, 4)
     expected_topk0_off = _align_up(int(ctx["PLAN_OFF"]) + planning_out_elems, 4)
     expected_order_off = expected_topk0_off + n4
@@ -370,10 +335,7 @@ def planning_invariant_errors(case, ctx, dst, cu_seqlens, experts_to_copy):
 
     cu_cpu = cu_seqlens.cpu()
     if cu_seqlens.dtype != torch.int32 or tuple(cu_seqlens.shape) != (E + B,):
-        errors.append(
-            f"cu_seqlens must be int32 [{E + B}], "
-            f"got {cu_seqlens.dtype} {tuple(cu_seqlens.shape)}"
-        )
+        errors.append(f"cu_seqlens must be int32 [{E + B}], got {cu_seqlens.dtype} {tuple(cu_seqlens.shape)}")
     else:
         prev = 0
         for gid, cur_t in enumerate(cu_cpu.tolist()):
@@ -384,8 +346,7 @@ def planning_invariant_errors(case, ctx, dst, cu_seqlens, experts_to_copy):
                 break
             if seg_len and seg_len % case.token_padding != 0:
                 errors.append(
-                    f"group {gid} segment length {seg_len} is not divisible "
-                    f"by token_padding={case.token_padding}"
+                    f"group {gid} segment length {seg_len} is not divisible by token_padding={case.token_padding}"
                 )
                 break
             prev = cur
@@ -395,8 +356,7 @@ def planning_invariant_errors(case, ctx, dst, cu_seqlens, experts_to_copy):
     copy_cpu = experts_to_copy.cpu()
     if experts_to_copy.dtype != torch.int32 or tuple(experts_to_copy.shape) != (R, B):
         errors.append(
-            f"experts_to_copy must be int32 [{R}, {B}], "
-            f"got {experts_to_copy.dtype} {tuple(experts_to_copy.shape)}"
+            f"experts_to_copy must be int32 [{R}, {B}], got {experts_to_copy.dtype} {tuple(experts_to_copy.shape)}"
         )
     elif not torch.all((copy_cpu == -1) | ((copy_cpu >= 0) & (copy_cpu < E))):
         errors.append("experts_to_copy contains invalid expert ids")
@@ -416,10 +376,7 @@ def dedup_plan_invariant_errors(case, ctx, plan):
     for field, shape in expected_shapes.items():
         t = getattr(plan, field)
         if t.dtype != torch.int32 or not t.is_contiguous() or tuple(t.shape) != shape:
-            errors.append(
-                f"{field} must be contiguous int32 {shape}, "
-                f"got {t.dtype} {tuple(t.shape)}"
-            )
+            errors.append(f"{field} must be contiguous int32 {shape}, got {t.dtype} {tuple(t.shape)}")
 
     if errors:
         return errors
@@ -433,3 +390,89 @@ def dedup_plan_invariant_errors(case, ctx, plan):
     _mapping, group_errors = _dedup_group_map(plan)
     errors.extend(group_errors)
     return errors
+
+
+# --- NVSHMEM symmetric-memory helpers (Triton-distributed backend) ---
+
+_PREFETCH_NVL_TENSORS: list[torch.Tensor] = []
+
+
+def zero_local_nvl_shards(ctx: dict) -> None:
+    """Clear this PE's NVSHMEM symmetric shards (combine reads remote peers)."""
+    rank = int(ctx["rank"])
+    nvsp = int(ctx["NvS_padded"])
+    meta_p = int(ctx["meta_chunk_padded"])
+    ctx["hidden_buf"][rank * nvsp : (rank + 1) * nvsp].zero_()
+    ctx["meta_buf"][rank * meta_p : (rank + 1) * meta_p].zero_()
+    if dist.is_initialized():
+        dist.barrier(device_ids=[rank])
+
+
+def fill_owner_experts(dst, E, H, Hp, seed, device):
+    gen = torch.Generator(device=device).manual_seed(seed)
+    dst.zero_()
+    elems_per_expert = H * Hp
+    chunk = max(1, min(E, (256 * 1024 * 1024) // max(1, elems_per_expert * 2)))
+    for e0 in range(0, E, chunk):
+        e1 = min(E, e0 + chunk)
+        dst[e0:e1].copy_(torch.randn(e1 - e0, H, Hp, dtype=torch.bfloat16, device=device, generator=gen))
+
+
+def make_single_owner_expert_views(rank, R, E, H, Hp):
+    import nvshmem.core as nvs
+
+    from moonep_td.buffer import create_nvl_dist_tensor, pad_dim0_for_alignment
+
+    padded_E = pad_dim0_for_alignment([E, H, Hp], torch.bfloat16)
+    full = create_nvl_dist_tensor([R, padded_E, H, Hp], torch.bfloat16, rank, R)
+    _PREFETCH_NVL_TENSORS.append(full)
+    for owner in range(R):
+        if rank == owner:
+            seed = 2026 + owner + E * 13 + H * 17 + Hp * 19
+            fill_owner_experts(full[owner, :E], E, H, Hp, seed, f"cuda:{rank}")
+            if padded_E > E:
+                full[owner, E:].zero_()
+    torch.cuda.synchronize()
+    dist.barrier(device_ids=[rank])
+
+    owners = []
+    for owner in range(R):
+        if rank == owner:
+            owners.append(full[owner, :E])
+        else:
+            owners.append(nvs.get_peer_tensor(full, owner)[owner, :E])
+    return owners
+
+
+def release_prefetch_nvl_tensors() -> None:
+    from moonep_td.buffer import release_nvl_dist_tensor
+
+    while _PREFETCH_NVL_TENSORS:
+        release_nvl_dist_tensor(_PREFETCH_NVL_TENSORS.pop())
+
+
+def grad_reduce_kwargs(args: dict) -> dict:
+    return {k: v for k, v in args.items() if not k.startswith("_")}
+
+
+def make_grad_reduce_nvl_buffers(rank, R, B, H, Hp, offsets, reduce_base_fn):
+    from moonep_td.buffer import create_nvl_dist_tensor, view_nvl_dist_rows
+
+    dev = f"cuda:{rank}"
+    nvl_tensors = []
+    args = {}
+    for name, off in (("gate", offsets[3]), ("up", offsets[4]), ("down", offsets[5])):
+        reduce_full = create_nvl_dist_tensor([B, H, Hp], torch.float32, rank, R)
+        nvl_tensors.append(reduce_full)
+        reduce_buf = view_nvl_dist_rows(reduce_full, R, B)
+        reduce_buf.copy_(reduce_base_fn(R, B, H, Hp, off, dev))
+        args[f"{name}_reduce_buffer"] = reduce_buf
+    args["_nvl_reduce_tensors"] = nvl_tensors
+    return args
+
+
+def release_grad_reduce_nvl_tensors(args: dict) -> None:
+    from moonep_td.buffer import release_nvl_dist_tensor
+
+    for t in args.get("_nvl_reduce_tensors", ()):
+        release_nvl_dist_tensor(t)

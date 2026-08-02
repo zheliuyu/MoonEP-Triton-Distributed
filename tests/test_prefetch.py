@@ -24,11 +24,11 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from moonep_td.buffer import create_nvl_dist_tensor, pad_dim0_for_alignment, release_nvl_dist_tensor
 from moonep_td.prefetch import launch_prefetch
-
-# NVSHMEM symmetric tensors created per prefetch case (freed in run_case).
-_PREFETCH_NVL_TENSORS: list[torch.Tensor] = []
+from tests.kernel_test_utils import (
+    make_single_owner_expert_views,
+    release_prefetch_nvl_tensors,
+)
 
 
 def _random_experts(E, B, seed):
@@ -109,6 +109,9 @@ CASES = [
         "owner_offset": 1,
         "experts": lambda E: [3, E - 1, 3, 0, E // 2, E - 1, 7, 1],
     },
+    # Production-like expert shape where expert_id * H * Hp crosses 2^31
+    # elements (expert ids >= 98 at 7168x3072). Catches 32-bit offset
+    # arithmetic anywhere in the TMA descriptor / addressing chain.
     {
         "name": "i64_offset_7168x3072",
         "E": 104,
@@ -175,46 +178,12 @@ def dist_env():
     yield rank, R
 
     dist.barrier(device_ids=[rank])
-
-
-def _fill_owner_experts(dst, E, H, Hp, seed, device):
-    """Fill owner expert rows without a single E×H×Hp temporary."""
-    gen = torch.Generator(device=device).manual_seed(seed)
-    dst.zero_()
-    elems_per_expert = H * Hp
-    chunk = max(1, min(E, (256 * 1024 * 1024) // max(1, elems_per_expert * 2)))
-    for e0 in range(0, E, chunk):
-        e1 = min(E, e0 + chunk)
-        dst[e0:e1].copy_(
-            torch.randn(
-                e1 - e0, H, Hp, dtype=torch.bfloat16, device=device, generator=gen
-            )
-        )
+    if owns_process_group:
+        dist.destroy_process_group()
 
 
 def make_single_owner_experts(rank, R, E, H, Hp):
-    """One symmetric [R, E_pad, H, Hp] tensor; row ``owner`` is filled on that rank."""
-    padded_E = pad_dim0_for_alignment([E, H, Hp], torch.bfloat16)
-    full = create_nvl_dist_tensor([R, padded_E, H, Hp], torch.bfloat16, rank, R)
-    _PREFETCH_NVL_TENSORS.append(full)
-    for owner in range(R):
-        if rank == owner:
-            seed = 2026 + owner + E * 13 + H * 17 + Hp * 19
-            _fill_owner_experts(
-                full[owner, :E], E, H, Hp, seed, f"cuda:{rank}"
-            )
-            if padded_E > E:
-                full[owner, E:].zero_()
-    torch.cuda.synchronize()
-    dist.barrier(device_ids=[rank])
-
-    import nvshmem.core as nvs
-
-    owners = []
-    for owner in range(R):
-        view = full[owner, :E] if rank == owner else nvs.get_peer_tensor(full, owner)[owner, :E]
-        owners.append(view)
-    return owners
+    return make_single_owner_expert_views(rank, R, E, H, Hp)
 
 
 def remote_owner_for(rank, R, owner_offset):
@@ -222,11 +191,6 @@ def remote_owner_for(rank, R, owner_offset):
     if owner_offset == 0:
         owner_offset = 1
     return (rank + owner_offset) % R
-
-
-def _release_prefetch_nvl_tensors():
-    while _PREFETCH_NVL_TENSORS:
-        release_nvl_dist_tensor(_PREFETCH_NVL_TENSORS.pop())
 
 
 def run_case(rank, R, case):
@@ -237,8 +201,7 @@ def run_case(rank, R, case):
     num_sms = case["num_sms"]
     dev = f"cuda:{rank}"
 
-    assert H % 128 == 0 and Hp % 128 == 0, \
-        f"{case['name']}: H/Hp must be multiples of 128"
+    assert H % 128 == 0 and Hp % 128 == 0, f"{case['name']}: H/Hp must be multiples of 128"
 
     try:
         all_remote = make_single_owner_experts(rank, R, E, H, Hp)
@@ -251,9 +214,7 @@ def run_case(rank, R, case):
         assert len(expert_ids) == B
         experts_to_copy = torch.tensor(expert_ids, dtype=torch.int32, device=dev)
         sentinel = -123.0
-        prefetch_buffers = torch.full(
-            (B, H, Hp), sentinel, dtype=torch.bfloat16, device=dev
-        )
+        prefetch_buffers = torch.full((B, H, Hp), sentinel, dtype=torch.bfloat16, device=dev)
 
         launch_prefetch(remote_expert, prefetch_buffers, experts_to_copy, num_sms=num_sms)
         torch.cuda.synchronize()
@@ -266,10 +227,7 @@ def run_case(rank, R, case):
                     torch.full_like(prefetch_buffers[b], sentinel),
                 ):
                     ok = False
-                    print(
-                        f"[rank {rank}] {case['name']} mismatch: unused "
-                        f"buffer={b} was modified"
-                    )
+                    print(f"[rank {rank}] {case['name']} mismatch: unused buffer={b} was modified")
                 continue
             if not torch.equal(prefetch_buffers[b], remote_expert[e]):
                 ok = False
@@ -284,14 +242,11 @@ def run_case(rank, R, case):
         assert ok_tensor.item() == 1, f"{case['name']} failed"
 
         if rank == 0:
-            print(
-                f"  [PASS] {case['name']}: E={E}, B={B}, "
-                f"H={H}, Hp={Hp}, num_sms={num_sms}"
-            )
+            print(f"  [PASS] {case['name']}: E={E}, B={B}, H={H}, Hp={Hp}, num_sms={num_sms}")
 
         dist.barrier(device_ids=[rank])
     finally:
-        _release_prefetch_nvl_tensors()
+        release_prefetch_nvl_tensors()
         torch.cuda.empty_cache()
 
 

@@ -45,7 +45,12 @@ class MoonEPCommPlan:
             dup_groups=self.dup_groups.clone(),
             dup_loffs=self.dup_loffs.clone(),
             dup_counts=self.dup_counts.clone(),
-            N=self.N, R=self.R, E=self.E, B=self.B, NvS=self.NvS, K=self.K,
+            N=self.N,
+            R=self.R,
+            E=self.E,
+            B=self.B,
+            NvS=self.NvS,
+            K=self.K,
         )
 
 
@@ -87,15 +92,25 @@ def allocate_planning_outputs(ctx: dict) -> tuple[MoonEPCommPlan, torch.Tensor]:
     dst = torch.empty(_round4(N), dtype=torch.int32, device=dev)[:N]
     cu_seqlens = torch.empty(_round4(E + B), dtype=torch.int32, device=dev)[: E + B]
     experts_to_copy = torch.empty(_round4(R * B), dtype=torch.int32, device=dev)[: R * B].view(R, B)
-    zero_fill_ranges = torch.empty(_round4((E + B) * 2), dtype=torch.int32, device=dev)[:(E + B) * 2].view(E + B, 2)
+    zero_fill_ranges = torch.empty(_round4((E + B) * 2), dtype=torch.int32, device=dev)[: (E + B) * 2].view(E + B, 2)
     remote_stats = torch.empty(_round4(2), dtype=torch.int32, device=dev)[:2]
     dup_groups = torch.empty(_round4(NvS * 3), dtype=torch.int32, device=dev)[: NvS * 3].view(NvS, 3)
     dup_loffs = torch.empty(_round4(NvS), dtype=torch.int32, device=dev)[:NvS]
     dup_counts = torch.empty(_round4(2), dtype=torch.int32, device=dev)[:2]
     plan = MoonEPCommPlan(
-        dst=dst, experts_to_copy=experts_to_copy, zero_fill_ranges=zero_fill_ranges,
-        remote_stats=remote_stats, dup_groups=dup_groups, dup_loffs=dup_loffs,
-        dup_counts=dup_counts, N=N, R=R, E=E, B=B, NvS=NvS, K=K,
+        dst=dst,
+        experts_to_copy=experts_to_copy,
+        zero_fill_ranges=zero_fill_ranges,
+        remote_stats=remote_stats,
+        dup_groups=dup_groups,
+        dup_loffs=dup_loffs,
+        dup_counts=dup_counts,
+        N=N,
+        R=R,
+        E=E,
+        B=B,
+        NvS=NvS,
+        K=K,
     )
     return plan, cu_seqlens
 
@@ -121,7 +136,10 @@ def _launch_planning_kernel(
     )
 
     dst_pos, cu, etc, rs, zfr, _ = launch_planning_torch_reference(
-        ctx, topk_experts_flat, tokens_per_expert, materialize_dedup=False,
+        ctx,
+        topk_experts_flat,
+        tokens_per_expert,
+        materialize_dedup=False,
     )
     publish_src_info_to_meta(ctx, dst_pos)
     dst = encode_dst_duplicates(

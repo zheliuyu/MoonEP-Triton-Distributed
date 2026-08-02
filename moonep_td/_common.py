@@ -32,6 +32,7 @@ def cached_block_h(H: int) -> int:
 def launch_cooperative_opts() -> dict:
     try:
         from triton_dist.utils import launch_cooperative_grid_options
+
         return launch_cooperative_grid_options()
     except Exception:
         return {}
@@ -40,6 +41,7 @@ def launch_cooperative_opts() -> dict:
 @functools.lru_cache(maxsize=1)
 def _grid_sync_kernel_fn():
     import triton.language as tl
+
     from moonep_td._triton_runtime import triton_dist
 
     td = triton_dist()
@@ -73,8 +75,8 @@ def launch_grid_sync(ctx: dict) -> None:
 def launch_cross_rank_barrier(ctx: dict) -> None:
     """Publish NVSHMEM/NVL writes across ranks (MoonEP cross_rank_barrier)."""
     launch_grid_sync(ctx)
-    from triton_dist.utils import nvshmem_barrier_all_on_stream
     import torch
+    from triton_dist.utils import nvshmem_barrier_all_on_stream
 
     nvshmem_barrier_all_on_stream(torch.cuda.current_stream())
     launch_grid_sync(ctx)

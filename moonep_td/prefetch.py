@@ -14,6 +14,7 @@ _TILE = 128
 @functools.lru_cache(maxsize=None)
 def _kernel():
     import triton.language as tl
+
     from moonep_td._triton_runtime import triton_dist
 
     td = triton_dist()
@@ -85,9 +86,7 @@ def launch_prefetch(
     B, out_h, out_hp = (int(x) for x in prefetch_buffers.shape)
     assert out_h == H and out_hp == Hp
     assert experts_to_copy.numel() == B
-    assert H % _TILE == 0 and Hp % _TILE == 0, (
-        f"H and H' must be multiples of {_TILE}, got ({H}, {Hp})"
-    )
+    assert H % _TILE == 0 and Hp % _TILE == 0, f"H and H' must be multiples of {_TILE}, got ({H}, {Hp})"
     assert isinstance(num_sms, int) and num_sms > 0
 
     tiles_m = H // _TILE

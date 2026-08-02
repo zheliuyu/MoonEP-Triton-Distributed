@@ -46,7 +46,11 @@ def ensure_nvshmem_initialized(group: dist.ProcessGroup | None = None) -> None:
             "torch.distributed must be initialized before moonep_td.Buffer. "
             "Call dist.init_process_group then ensure_nvshmem_initialized()."
         )
-    from triton_dist.utils import init_nvshmem_by_torch_process_group, is_shmem_initialized, nvshmem_barrier_all_on_stream
+    from triton_dist.utils import (
+        init_nvshmem_by_torch_process_group,
+        is_shmem_initialized,
+        nvshmem_barrier_all_on_stream,
+    )
 
     if not is_shmem_initialized():
         pg = group if group is not None else dist.group.WORLD
@@ -57,9 +61,7 @@ def ensure_nvshmem_initialized(group: dist.ProcessGroup | None = None) -> None:
 
 def view_nvl_dist_rows(full: torch.Tensor, world_size: int, B: int) -> torch.Tensor:
     """View a MoonEP-style ``[R * B, ...]`` NVL buffer as ``[R, B, ...]``."""
-    assert full.shape[0] == world_size * B, (
-        f"expected dim0={world_size * B}, got {full.shape[0]}"
-    )
+    assert full.shape[0] == world_size * B, f"expected dim0={world_size * B}, got {full.shape[0]}"
     tail = full.shape[1:]
     return full.view(world_size, B, *tail)
 
@@ -77,6 +79,7 @@ def nvl_dist_peer_row(full: torch.Tensor, row: int, rank: int, world_size: int, 
     if row == rank:
         return buf[row]
     import nvshmem.core
+
     return nvshmem.core.get_peer_tensor(buf, row)[row]
 
 
@@ -102,6 +105,7 @@ def create_nvl_dist_tensor(
 
 def release_nvl_dist_tensor(tensor: torch.Tensor) -> None:
     from triton_dist.utils import nvshmem_free_tensor_sync
+
     nvshmem_free_tensor_sync(tensor)
 
 
@@ -122,6 +126,10 @@ def create_nvl_single_owner_tensor(
         world_size = dist.get_world_size(group=group)
     padded_E, H, Hp = shape[0], shape[1], shape[2]
     full = create_nvl_dist_tensor(
-        [world_size, padded_E, H, Hp], dtype, local_rank, world_size, group=group,
+        [world_size, padded_E, H, Hp],
+        dtype,
+        local_rank,
+        world_size,
+        group=group,
     )
     return full[owner_rank]
